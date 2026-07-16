@@ -567,6 +567,33 @@ def cmd_stack(args) -> int:
     return 0
 
 
+def cmd_artifacts(args) -> int:
+    with open_case(args) as case:
+        groups = case.artifact_stacks()
+        if not groups:
+            print("no host-based indicators yet — add one with "
+                  r"'vera finding \"…\" -t hostindicator --path C:\...\evil.dll'")
+            return 0
+        print("Host-based indicators stacked by artifact name "
+              "(most-spread first):")
+        for g in groups:
+            atype = "/".join(g["artifact_types"])
+            head = f"  {g['name']}  (×{g['count']}"
+            if g["host_count"]:
+                s = "s" if g["host_count"] != 1 else ""
+                head += f", {g['host_count']} host{s}"
+            head += ")"
+            if atype:
+                head += f"  [{atype}]"
+            print(head)
+            hosts = ", ".join(h["name"] for h in g["hosts"])
+            if hosts:
+                print(f"      {c('2', 'hosts: ' + hosts)}")
+            for p in g["paths"]:
+                print(f"      {c('2', p)}")
+    return 0
+
+
 def cmd_attach(args) -> int:
     kind, ref_id = db.resolve_ref(args.ref)
     owner = {"A": "action", "F": "finding", "E": "evidence"}[kind]
@@ -928,6 +955,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("stack", help="cross-host findings, rarest first "
                                      "(least-frequency-of-occurrence triage)")
     p.set_defaults(func=cmd_stack)
+
+    p = sub.add_parser("artifacts", help="host-based indicators stacked by "
+                                         "artifact name, regardless of path")
+    p.set_defaults(func=cmd_artifacts)
 
     p = sub.add_parser("coverage", help="per-host analysis rollup — spot hosts "
                                         "nobody has examined yet")

@@ -1184,3 +1184,125 @@ def test_api_evidence_hosts_collection_rules(running_server):
     info = json.loads(_req(port, "GET", "/api/case")[1])
     ev = next(e for e in info["evidence"] if e["id"] == lid)
     assert {h["name"] for h in ev["hosts"]} == {"RD01", "RD02"}
+
+
+# ---- artifact stacking (host indicators by name, regardless of path) ----
+
+def test_artifact_name_derived_from_path(case):
+    # a bare --path fills the stackable artifact name from the basename
+    fid = case.add_finding("forwarded import", ftype="hostindicator",
+                           attrs={"artifact_type": "dll",
+                                  "path": r"C:\Users\nromanoff\AppData\Local\slack\CRYPTBASE.dll"})
+    f = case.get_finding(fid)
+    assert f["attrs"]["artifact"] == "CRYPTBASE.dll"
+    assert f["attrs"]["path"].endswith(r"slack\CRYPTBASE.dll")
+    # an explicit name is never overwritten by the path basename
+    fid2 = case.add_finding("x", ftype="hostindicator",
+                            attrs={"artifact": "evil.dll", "path": r"C:\a\other.dll"})
+    assert case.get_finding(fid2)["attrs"]["artifact"] == "evil.dll"
+    # update_finding derives too, using the stored ftype
+    case.update_finding(fid2, attrs={"artifact": "", "path": r"D:\x\three.dll"})
+    assert case.get_finding(fid2)["attrs"]["artifact"] == "three.dll"
+
+
+def test_artifact_stacks(case):
+    for h in ("RD04", "RD09", "RD01"):
+        case.add_host(h)
+    a = case.add_action("dllsearch")
+    # same name CRYPTBASE.dll, different paths + hosts -> one stack of 2
+    case.add_finding("import RD04", ftype="hostindicator", action_id=a,
+                     host_ids=[case.resolve_host("RD04")],
+                     attrs={"artifact_type": "dll",
+                            "path": r"C:\Users\a\AppData\Local\slack\CRYPTBASE.dll"})
+    case.add_finding("import RD09", ftype="hostindicator", action_id=a,
+                     host_ids=[case.resolve_host("RD09")],
+                     attrs={"artifact_type": "dll",
+                            "path": r"C:\Users\b\AppData\Local\teams\cryptbase.dll"})
+    case.add_finding("task RD01", ftype="hostindicator", action_id=a,
+                     host_ids=[case.resolve_host("RD01")],
+                     attrs={"artifact_type": "sched", "path": r"c:\windows\stun.exe"})
+    groups = case.artifact_stacks()
+    assert [g["name"] for g in groups][0] == "CRYPTBASE.dll"  # most-spread first
+    top = groups[0]
+    assert top["count"] == 2 and top["host_count"] == 2
+    assert {h["name"] for h in top["hosts"]} == {"RD04", "RD09"}
+    assert len(top["paths"]) == 2  # both distinct full paths retained
+    assert top["artifact_types"] == ["dll"]
+    stun = next(g for g in groups if g["name"] == "stun.exe")
+    assert stun["count"] == 1
+
+
+def test_migration_v9_to_v10_splits_artifact_path(tmp_path):
+    p = str(tmp_path / "v9.vera")
+    c = Case(p, create=True)
+    # simulate a pre-v10 host indicator: full path jammed into 'artifact'
+    fid = c.add_finding("forwarded import", ftype="hostindicator",
+                        attrs={"artifact_type": "dll"})
+    c.conn.execute(
+        "UPDATE findings SET attrs = ? WHERE id = ?",
+        (json.dumps({"artifact_type": "dll",
+                     "artifact": r"C:\Users\x\AppData\Local\slack\CRYPTBASE.dll"}), fid))
+    # a bare-name artifact must be left untouched by the migration
+    fid2 = c.add_finding("bat", ftype="hostindicator",
+                         attrs={"artifact": "installoffice2019.bat"})
+    c.conn.execute("UPDATE case_meta SET value='9' WHERE key='schema_version'")
+    c.conn.commit()
+    c.close()
+    with Case(p) as c2:
+        assert c2.meta()["schema_version"] == str(db.SCHEMA_VERSION)
+        f = c2.get_finding(fid)
+        assert f["attrs"]["artifact"] == "CRYPTBASE.dll"
+        assert f["attrs"]["path"].endswith(r"slack\CRYPTBASE.dll")
+        f2 = c2.get_finding(fid2)
+        assert f2["attrs"]["artifact"] == "installoffice2019.bat"
+        assert not f2["attrs"].get("path")
+
+
+def test_artifact_path_in_exports(case, tmp_path):
+    case.add_host("RD04")
+    case.add_host("RD09")
+    a = case.add_action("dllsearch")
+    for h, d in (("RD04", "slack"), ("RD09", "teams")):
+        case.add_finding(f"import {h}", ftype="hostindicator", action_id=a,
+                         host_ids=[case.resolve_host(h)],
+                         attrs={"artifact_type": "dll",
+                                "path": rf"C:\Users\u\AppData\Local\{d}\CRYPTBASE.dll"})
+    out = str(tmp_path / "out")
+    written = export.export(case, "csv", out)
+    hbi = next(p for p in written if p.endswith("_HostBasedIndicators.csv"))
+    text = open(hbi).read()
+    assert "Path" in text and r"slack\CRYPTBASE.dll" in text
+    md = export.render_md(case)
+    assert "Artifacts by name" in md and "CRYPTBASE.dll" in md
+
+
+def test_api_artifacts(running_server):
+    port = running_server
+    # register hosts and add two same-named host indicators on different paths
+    for h in ("HXA", "HXB"):
+        _req(port, "POST", "/api/hosts", {"name": h})
+    info = json.loads(_req(port, "GET", "/api/case")[1])
+    ids = {h["name"]: h["id"] for h in info["hosts"]}
+    for h, d in (("HXA", "slack"), ("HXB", "teams")):
+        _req(port, "POST", "/api/findings",
+             {"title": f"imp {h}", "ftype": "hostindicator", "host_ids": [ids[h]],
+              "attrs": {"artifact_type": "dll",
+                        "path": rf"C:\U\{d}\CRYPTBASE.dll"}})
+    status, raw = _req(port, "GET", "/api/artifacts")
+    assert status == 200
+    groups = json.loads(raw)
+    top = groups[0]
+    assert top["name"] == "CRYPTBASE.dll"
+    assert top["count"] == 2 and top["host_count"] == 2
+    assert len(top["paths"]) == 2
+
+
+def test_cli_artifacts(cli_case, capsys):
+    assert main(["host", "add", "RD04"]) == 0
+    assert main(["finding", "imp", "-t", "hostindicator", "--on", "none",
+                 "--attr", "artifact_type=dll",
+                 "--path", r"C:\U\slack\CRYPTBASE.dll", "--hosts", "RD04"]) == 0
+    capsys.readouterr()
+    assert main(["artifacts"]) == 0
+    out = capsys.readouterr().out
+    assert "CRYPTBASE.dll" in out and r"C:\U\slack\CRYPTBASE.dll" in out

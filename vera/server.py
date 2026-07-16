@@ -180,6 +180,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(case.coverage())
             elif url.path == "/api/stack":
                 self._json(case.stack_findings())
+            elif url.path == "/api/artifacts":
+                self._json(case.artifact_stacks())
             elif url.path == "/api/host_findings":
                 hid = int((q.get("id") or [0])[0])
                 self._json(case.findings_for_host(hid))

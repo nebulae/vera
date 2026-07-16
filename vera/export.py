@@ -281,6 +281,24 @@ def render_md(case: Case, linker=None) -> str:
               f"| {_mdcell(names)} |")
         w("")
 
+    artifacts = [g for g in case.artifact_stacks()
+                 if g["count"] > 1 or g["host_count"] > 1]
+    if artifacts:
+        w("## Artifacts by name")
+        w("")
+        w("Host-based indicators stacked by artifact name regardless of path — "
+          "the same name across directories/hosts is one row, most-spread first.")
+        w("")
+        w("| Artifact | × | Type | Hosts | Paths |")
+        w("|----------|---|------|-------|-------|")
+        for g in artifacts:
+            hosts = ", ".join(h["name"] for h in g["hosts"])
+            paths = "<br>".join(_mdcell(p) for p in g["paths"])
+            atype = ", ".join(g["artifact_types"])
+            w(f"| {_mdcell(g['name'])} | {g['count']} | {_mdcell(atype)} "
+              f"| {_mdcell(hosts)} | {paths} |")
+        w("")
+
     for ft in types.FINDING_TYPES.values():
         if not ft.csv_name:
             continue

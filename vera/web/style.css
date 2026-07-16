@@ -671,3 +671,25 @@ tr.cov-gap td { background: color-mix(in srgb, #d97706 10%, transparent); }
   background: color-mix(in srgb, #16a34a 8%, transparent);
   font-size: 13px;
 }
+
+/* ---------- artifacts: host indicators stacked by name ---------- */
+.seg-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.art-group { margin: 10px 0 16px; }
+.art-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--line);
+}
+.art-name { font-weight: 700; font-size: 15px; }
+.art-head .stack-n { font-weight: 700; color: var(--finding); }
+.art-hosts { color: var(--muted); font-size: 13px; margin-left: auto; }
+table.art-members { margin-top: 4px; }
+.path-list { display: flex; flex-direction: column; gap: 2px; }
+.path-list code { white-space: nowrap; }

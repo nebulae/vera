@@ -129,13 +129,15 @@ _register(FindingType(
     label="Host-Based Indicator",
     view="Host Indicators",
     fields=(
-        Field("artifact_type", "Artifact Type", "prefetch, shimcache, service ..."),
-        Field("artifact", "Artifact", "defaults to the finding title"),
+        Field("artifact_type", "Artifact Type", "prefetch, shimcache, service, dll ..."),
+        Field("artifact", "Artifact Name", "e.g. CRYPTBASE.dll — the stackable name (auto-filled from the path)"),
+        Field("path", "Full Path", r"full location, e.g. C:\Users\...\CRYPTBASE.dll"),
     ),
     csv_name="HostBasedIndicators",
-    csv_headers=("Artifact Type", "Date/Time", "Artifact", "Host"),
+    csv_headers=("Artifact Type", "Date/Time", "Artifact", "Path", "Host"),
     csv_row=lambda f: [_attrs(f).get("artifact_type", ""), f.get("event_time", ""),
                        _attrs(f).get("artifact") or f.get("title", ""),
+                       _attrs(f).get("path", ""),
                        f.get("host", "")],
 ))
 
@@ -154,6 +156,19 @@ TIMELINE_CSV_HEADERS = ("Date / Time", "Host Name", "Activity")
 def timeline_csv_row(f: dict) -> list:
     activity = _attrs(f).get("activity") or f.get("title", "")
     return [f.get("event_time", ""), f.get("host", ""), activity]
+
+
+def basename(path: str) -> str:
+    """Final path component, treating \\ and / alike (Windows or POSIX)."""
+    return (path or "").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
+def artifact_name(f: dict) -> str:
+    """The stackable name for a host-based indicator finding: the explicit
+    artifact name, else the basename of its full path, else the title."""
+    a = _attrs(f)
+    return ((a.get("artifact") or "").strip() or basename(a.get("path", ""))
+            or f.get("title", ""))
 
 
 def all_attr_fields() -> dict[str, Field]:

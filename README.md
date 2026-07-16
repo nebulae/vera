@@ -95,7 +95,11 @@ retyping a name.
   a finding or evidence item).
 - **Finding** (`F#`) — something an action showed you. Typed (`malware`,
   `account`, `host`, `netindicator`, `hostindicator`, `event`, `note`) with
-  type-specific fields, an optional **event time** (when it happened in the
+  type-specific fields. Host-based indicators carry a stackable **artifact
+  name** (e.g. `CRYPTBASE.dll`) *and* its **full path** as separate fields — the
+  name is what you stack on, the path pins the location; paste a path and the
+  name auto-fills from its basename. Findings also carry an optional **event
+  time** (when it happened in the
   incident — drives the Timeline), optional **file hashes** (MD5 / SHA-1 /
   SHA-256, validated and lowercased; `vera f … --hash-file evil.exe` computes
   all three), and a star for key findings.
@@ -124,6 +128,11 @@ retyping a name.
   the evidence, steps, and findings that reference it, plus which tools were
   used and when it was last examined. Hosts with no analysis logged are called
   out — the answer to "did we look at everything?".
+- **Artifacts** — `vera artifacts` (and the web **Artifacts** tab) stacks
+  host-based indicators by artifact **name regardless of path**: the same planted
+  DLL name seen in several app directories across hosts collapses into one entry
+  that still lists every distinct full path and host, most-spread first. The
+  **Host Indicators** tab defaults to this grouping too (toggle to a flat table).
 - **Drill-down** — `vera run ... --from F3` links a new action to the finding
   that prompted it. That chain *is* the investigation.
 
@@ -157,6 +166,8 @@ original run.
 - **Coverage** — the hosts × analysis matrix: evidence/step/finding counts,
   per-tool step counts, and last-examined time for every host, with unexamined
   hosts highlighted.
+- **Artifacts** — host-based indicators stacked by artifact name regardless of
+  path; the Host Indicators tab groups by name by default (toggle to flat)
 - **Category tabs** — Compromised Hosts / Accounts, Malware & Tools,
   Network / Host Indicators, generated automatically from finding types
 - **Evidence** — items and hashes, plus collections/batches
@@ -177,8 +188,9 @@ everything that was ever entered.
 
 - `vera export md` — full replayable report: hosts + collections, evidence +
   hashes, every action in order with commands and captured output, nested
-  findings, timeline, a cross-host-indicator appendix (rarest first), and the
-  classic category appendices.
+  findings, timeline, a cross-host-indicator appendix (rarest first), an
+  artifacts-by-name appendix (host indicators stacked by name across paths), and
+  the classic category appendices.
 - `vera export csv` — one CSV per classic IR-spreadsheet sheet (same column
   headers), plus `Hosts.csv`, `CompromisedHosts.csv` (derived from host
   disposition), and `CrossHostFindings.csv`.

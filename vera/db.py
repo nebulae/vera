@@ -8,7 +8,9 @@ import json
 import os
 import sqlite3
 
-SCHEMA_VERSION = 9
+from . import types
+
+SCHEMA_VERSION = 10
 OUTPUT_CAP = 256 * 1024        # chars of captured command output stored per action
 ATTACHMENT_CAP = 25 * 1024 * 1024  # max bytes per stored attachment
 
@@ -301,9 +303,36 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
                      "DEFAULT ''")
 
 
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """v9 -> v10: split a host-indicator 'artifact' that holds a full path into
+    a stackable name + a 'path' field.
+
+    Conservative and non-destructive: only when the artifact value contains a
+    path separator and no 'path' is set yet. The full string is preserved in
+    'path'; 'artifact' keeps its basename (the name you stack by). Bare-name
+    artifacts (no separator) are left untouched.
+    """
+    for r in conn.execute("SELECT id, attrs FROM findings "
+                          "WHERE ftype = 'hostindicator'"):
+        try:
+            attrs = json.loads(r[1] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(attrs, dict):
+            continue
+        art = (attrs.get("artifact") or "").strip()
+        if art and not (attrs.get("path") or "").strip() \
+                and ("\\" in art or "/" in art):
+            attrs["path"] = art
+            attrs["artifact"] = types.basename(art)
+            conn.execute("UPDATE findings SET attrs = ? WHERE id = ?",
+                         (json.dumps(attrs), r[0]))
+
+
 # Applied in ascending order to bring a case up to SCHEMA_VERSION.
 MIGRATIONS = {2: _migrate_v2, 3: _migrate_v3, 4: _migrate_v4, 5: _migrate_v5,
-              6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8, 9: _migrate_v9}
+              6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8, 9: _migrate_v9,
+              10: _migrate_v10}
 
 
 class CaseError(Exception):
@@ -531,13 +560,14 @@ class Case:
         if action_id is not None:
             self._require("actions", action_id, "A")
         clean_hashes = normalize_hashes(hashes)
+        attrs = self._normalize_finding_attrs(ftype, attrs)
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO findings(action_id, created_at, event_time, title,"
                 " detail, ftype, host, attrs, hashes, starred)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (action_id, _now(), event_time, title, detail, ftype, host,
-                 json.dumps(attrs or {}), json.dumps(clean_hashes), int(starred)))
+                 json.dumps(attrs), json.dumps(clean_hashes), int(starred)))
             fid = cur.lastrowid
         if host_ids:
             self.set_finding_hosts(fid, host_ids)
@@ -578,9 +608,27 @@ class Case:
             raise CaseError("evidence label must not be empty")
         self._update("evidence", self.EVIDENCE_EDITABLE, evidence_id, fields, "E")
 
+    @staticmethod
+    def _normalize_finding_attrs(ftype: str, attrs: dict | None) -> dict:
+        """Fill a host-indicator's stackable name from its path when left blank,
+        so `--path C:\\...\\evil.dll` alone yields artifact `evil.dll`."""
+        attrs = dict(attrs or {})
+        if ftype == "hostindicator":
+            path = (attrs.get("path") or "").strip()
+            if path and not (attrs.get("artifact") or "").strip():
+                attrs["artifact"] = types.basename(path)
+        return attrs
+
     def update_finding(self, finding_id: int, **fields) -> None:
         if isinstance(fields.get("attrs"), dict):
-            fields["attrs"] = json.dumps(fields["attrs"])
+            ftype = fields.get("ftype")
+            if ftype is None:
+                row = self.conn.execute(
+                    "SELECT ftype FROM findings WHERE id = ?", (finding_id,)
+                ).fetchone()
+                ftype = row["ftype"] if row else ""
+            fields["attrs"] = json.dumps(
+                self._normalize_finding_attrs(ftype, fields["attrs"]))
         if "hashes" in fields and isinstance(fields["hashes"], dict):
             fields["hashes"] = json.dumps(normalize_hashes(fields["hashes"]))
         self._update("findings", self.FINDING_EDITABLE, finding_id, fields, "F")
@@ -1102,6 +1150,45 @@ class Case:
             JOIN hosts h ON h.id = fh.host_id AND h.deleted_at = ''
             GROUP BY f.id ORDER BY stack ASC, f.id ASC""")
         return self._enrich([self._finding_dict(r) for r in rows])
+
+    def artifact_stacks(self) -> list[dict]:
+        """Host-based indicators grouped by artifact name, regardless of path.
+
+        The same planted DLL name across several app directories/hosts collapses
+        into one group that still lists every distinct full path and host. Names
+        are matched case-insensitively (Windows filenames); most-spread first so
+        the widely-deployed artifacts rise to the top.
+        """
+        rows = self._enrich([self._finding_dict(r) for r in self.conn.execute(
+            "SELECT * FROM findings WHERE ftype = 'hostindicator' ORDER BY id")])
+        groups: dict[str, dict] = {}
+        for f in rows:
+            name = types.artifact_name(f)
+            g = groups.get(name.lower())
+            if g is None:
+                g = groups[name.lower()] = {
+                    "name": name, "findings": [], "paths": [], "hosts": [],
+                    "artifact_types": [], "_host_ids": set(),
+                }
+            g["findings"].append(f)
+            path = (f.get("attrs") or {}).get("path", "").strip()
+            if path and path not in g["paths"]:
+                g["paths"].append(path)
+            atype = (f.get("attrs") or {}).get("artifact_type", "").strip()
+            if atype and atype not in g["artifact_types"]:
+                g["artifact_types"].append(atype)
+            for h in f.get("affected_hosts", []):
+                if h["id"] not in g["_host_ids"]:
+                    g["_host_ids"].add(h["id"])
+                    g["hosts"].append(h)
+        out = []
+        for g in groups.values():
+            g.pop("_host_ids")
+            g["count"] = len(g["findings"])
+            g["host_count"] = len(g["hosts"])
+            out.append(g)
+        out.sort(key=lambda g: (-g["count"], -g["host_count"], g["name"].lower()))
+        return out
 
     # -- attachments --------------------------------------------------------
 

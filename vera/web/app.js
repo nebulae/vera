@@ -45,6 +45,10 @@ function typeInfo(key) {
       || { key, label: key, fields: [], view: "" };
 }
 
+function basename(p) {
+  return String(p || "").replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop();
+}
+
 /* ---------- layout ---------- */
 
 async function boot() {
@@ -133,6 +137,7 @@ function tabList() {
     { id: "investigation", label: "Investigation" },
     { id: "timeline", label: "Timeline" },
     { id: "stack", label: "Stack" },
+    { id: "artifacts", label: "Artifacts" },
     { id: "hosts", label: "Hosts" },
     { id: "coverage", label: "Coverage" },
   ];
@@ -175,6 +180,7 @@ async function render() {
     if (state.tab === "investigation") await renderInvestigation(view);
     else if (state.tab === "timeline") await renderTimeline(view);
     else if (state.tab === "stack") await renderStack(view);
+    else if (state.tab === "artifacts") await renderArtifacts(view);
     else if (state.tab === "hosts") await renderHosts(view);
     else if (state.tab === "coverage") await renderCoverage(view);
     else if (state.tab === "evidence") await renderEvidence(view);
@@ -592,6 +598,17 @@ function findingForm({ actionId, inheritHosts, existing, done, close }) {
     const current = (existing && existing.attrs) || {};
     attrsGrid.replaceChildren(...t.fields.map((f) =>
       field(f.label, textInput(`attr:${f.key}`, f.hint || "", current[f.key] || ""))));
+    // convenience: keep the stackable artifact name in sync with the path's
+    // basename until the analyst types a name of their own
+    const pathInp = attrsGrid.querySelector('[name="attr:path"]');
+    const nameInp = attrsGrid.querySelector('[name="attr:artifact"]');
+    if (pathInp && nameInp) {
+      let auto = !nameInp.value.trim();
+      nameInp.addEventListener("input", () => { auto = !nameInp.value.trim(); });
+      pathInp.addEventListener("input", () => {
+        if (auto) nameInp.value = basename(pathInp.value.trim());
+      });
+    }
   }
   typeSelect.addEventListener("change", renderAttrFields);
 
@@ -908,7 +925,8 @@ function findingCard(f) {
   const chips = Object.entries(f.attrs || {}).filter(([, v]) => v);
   if (chips.length) {
     card.append(el("div", { class: "attr-chips" },
-      chips.map(([k, v]) => el("span", {}, el("b", {}, k.replaceAll("_", " ") + ": "), v))));
+      chips.map(([k, v]) => el("span", {}, el("b", {}, k.replaceAll("_", " ") + ": "),
+        (k === "path" || k === "sid") ? el("code", { class: "mono" }, v) : v))));
   }
   const hashes = Object.entries(f.hashes || {}).filter(([, v]) => v);
   if (hashes.length) {
@@ -1251,17 +1269,14 @@ async function renderTimeline(view) {
 
 /* ---------- category views ---------- */
 
-async function renderCategory(view, typeKey) {
-  const t = typeInfo(typeKey);
-  const rows = await api(`/api/findings?type=${encodeURIComponent(typeKey)}`);
-  if (!rows.length) {
-    emptyState(view, `No ${t.view.toLowerCase()} recorded yet`,
-      `Add findings with type “${t.label}” and they will be collected here automatically.`);
-    return;
-  }
+function segBtn(label, active, onclick) {
+  return el("button", { class: "btn small seg-btn" + (active ? " active" : ""), onclick }, label);
+}
+
+function categoryTable(t, rows) {
   const headers = ["Ref", "Title", "Host", "Event time",
     ...t.fields.map((f) => f.label), "Detail"];
-  const table = el("table", {},
+  return el("table", {},
     el("thead", {}, el("tr", {}, headers.map((h) => el("th", {}, h)))),
     el("tbody", {}, rows.map((f) => el("tr", {},
       el("td", {}, refLink(`F${f.id}`, `node-F${f.id}`)),
@@ -1270,7 +1285,95 @@ async function renderCategory(view, typeKey) {
       el("td", { class: "mono" }, f.event_time),
       t.fields.map((fld) => el("td", { class: "mono" }, (f.attrs || {})[fld.key] || "")),
       el("td", {}, f.detail)))));
-  view.replaceChildren(el("div", { class: "table-wrap" }, table));
+}
+
+async function renderCategory(view, typeKey) {
+  const t = typeInfo(typeKey);
+  if (typeKey === "hostindicator") return renderHostIndicators(view, t);
+  const rows = await api(`/api/findings?type=${encodeURIComponent(typeKey)}`);
+  if (!rows.length) {
+    emptyState(view, `No ${t.view.toLowerCase()} recorded yet`,
+      `Add findings with type “${t.label}” and they will be collected here automatically.`);
+    return;
+  }
+  view.replaceChildren(el("div", { class: "table-wrap" }, categoryTable(t, rows)));
+}
+
+// Host indicators default to grouping by artifact name (the same name across
+// different paths/hosts is one group); a toggle flattens to the plain table.
+async function renderHostIndicators(view, t) {
+  const rows = await api("/api/findings?type=hostindicator");
+  if (!rows.length) {
+    emptyState(view, "No host indicators recorded yet",
+      "Add findings with type “Host-Based Indicator” and they collect here — "
+      + "grouped by artifact name, regardless of path.");
+    return;
+  }
+  const flat = !!state.hostIndFlat;
+  const toolbar = el("div", { class: "toolbar" },
+    el("p", { class: "hint", style: "margin:0;flex:1" },
+      "Grouped by artifact name — the same name across different paths and hosts "
+      + "collapses into one group. Most-spread first."),
+    segBtn("Grouped", !flat, () => { state.hostIndFlat = false; render(); }),
+    segBtn("Flat", flat, () => { state.hostIndFlat = true; render(); }));
+  view.replaceChildren(toolbar);
+  if (flat) {
+    view.append(el("div", { class: "table-wrap" }, categoryTable(t, rows)));
+    return;
+  }
+  const groups = await api("/api/artifacts");
+  for (const g of groups) view.append(artifactGroupCard(g));
+}
+
+function artifactGroupCard(g) {
+  const head = el("div", { class: "art-head" },
+    el("span", { class: "art-name" }, g.name),
+    el("span", { class: "stack-n mono" }, `×${g.count}`),
+    g.artifact_types.length ? el("span", { class: "tag" }, g.artifact_types.join(", ")) : null,
+    el("span", { class: "art-hosts" },
+      `🖥 ${g.host_count} host${g.host_count === 1 ? "" : "s"}`
+      + (g.hosts.length ? ": " + g.hosts.map((h) => h.name).join(", ") : "")));
+  const table = el("table", { class: "art-members" },
+    el("thead", {}, el("tr", {},
+      ["Ref", "Title", "Host", "Event time", "Full path"].map((h) => el("th", {}, h)))),
+    el("tbody", {}, g.findings.map((f) => el("tr", {},
+      el("td", {}, refLink(`F${f.id}`, `node-F${f.id}`)),
+      el("td", {}, (f.starred ? "★ " : "") + f.title),
+      el("td", {}, f.host),
+      el("td", { class: "mono" }, f.event_time),
+      el("td", {}, el("code", { class: "mono" }, (f.attrs || {}).path || "—"))))));
+  return el("div", { class: "art-group" }, head, el("div", { class: "table-wrap" }, table));
+}
+
+/* ---------- artifacts (host indicators stacked by name) ---------- */
+
+async function renderArtifacts(view) {
+  const groups = await api("/api/artifacts");
+  view.replaceChildren(el("p", { class: "hint" },
+    "Host-based indicators stacked by artifact name, regardless of path — the same "
+    + "planted name across different directories and hosts is one row. Most-spread first; "
+    + "every distinct full path and host is listed."));
+  if (!groups.length) {
+    view.append(el("div", { class: "empty" },
+      el("p", { class: "empty-title" }, "No host-based indicators yet"),
+      el("p", { class: "empty-hint" },
+        "Add findings of type “Host-Based Indicator” with an artifact name and they "
+        + "stack here by name.")));
+    return;
+  }
+  const table = el("table", {},
+    el("thead", {}, el("tr", {},
+      ["Artifact", "×", "Type", "Hosts", "Refs", "Paths"].map((h) => el("th", {}, h)))),
+    el("tbody", {}, groups.map((g) => el("tr", {},
+      el("td", {}, el("b", {}, g.name)),
+      el("td", { class: "mono stack-n" }, String(g.count)),
+      el("td", {}, g.artifact_types.join(", ")),
+      el("td", {}, `${g.host_count}${g.hosts.length ? " — " + g.hosts.map((h) => h.name).join(", ") : ""}`),
+      el("td", {}, g.findings.map((f, i) =>
+        el("span", {}, i ? " " : "", refLink(`F${f.id}`, `node-F${f.id}`)))),
+      el("td", {}, el("div", { class: "path-list" },
+        (g.paths.length ? g.paths : ["—"]).map((p) => el("code", { class: "mono" }, p))))))));
+  view.append(el("div", { class: "table-wrap" }, table));
 }
 
 /* ---------- evidence ---------- */

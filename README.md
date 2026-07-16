@@ -36,22 +36,77 @@ vera f "rundll32 spawned by wmiprvse" -t malware --host WS01 \
 vera run "vol.py -f ws01.mem windows.netscan" --host WS01 --from F1
 vera f "beacon to 203.0.113.7:443" -t netindicator --address 203.0.113.7
 
+# a GUI/tool step has no command line — log the procedure + a screenshot
+vera manual "Opened NTUSER.DAT → CurrentVersion\Run" --tool "Registry Explorer" \
+       --host WS01 --from F1 --shot runkey.png
+vera attach F1 proof.png --role exhibit --caption "the smoking gun"
+
 vera log            # the whole investigation tree, in order
-vera serve          # browse/annotate in your browser
+vera serve          # browse/annotate in your browser (paste screenshots with Ctrl+V)
 vera export md      # replayable report; also: csv (FOR508 sheets), json
 ```
+
+### At scale — many hosts, one finding
+
+For enterprise triage (e.g. amcache/shimcache across dozens of hosts), register
+the hosts once, group evidence into a collection, and stack a single finding
+across every host it touches:
+
+```sh
+vera collection add "Lab2 amcache+shimcache" --tool AmcacheParser --scope "40 hosts"
+vera host add --from hosts.txt --type workstation      # register 40 hosts at once
+vera host add DC01 --type "domain controller" --ip 10.0.0.10
+
+vera manual "Parsed all 40 exports in Timeline Explorer" --tool AmcacheParser --collection C1
+# one finding, stacked across the hosts that show the indicator
+vera f "svchost.exe anomalous path C:\temp" -t malware --hosts "WS03,WS07,WS11,WS22"
+
+vera stack          # cross-host findings, rarest first (least-frequency triage)
+vera host show WS03 # everything affecting one host
+```
+
+Evidence and actions link to hosts the same way — `--hosts` on `vera evidence
+add`, `vera run`, and `vera manual`. Host references are resolved **against the
+registry** (`vera host add` first); an unknown name is an error, not a new host.
+The registry is the hub: everything ties back to it by reference, not by
+retyping a name.
 
 ## Concepts
 
 - **Evidence** (`E#`) — the images/dumps/collections you work from, with
-  hashes. The ground truth that makes replay meaningful.
-- **Action** (`A#`) — one command or tool run: exact command line, host,
-  evidence used, captured output (hashed, capped at 256 KB), and why you ran
-  it. Numbered in execution order.
+  hashes and the **source host(s)** they came from. The ground truth that makes
+  replay meaningful.
+- **Action / step** (`A#`) — one investigative step, numbered in execution
+  order. Two kinds:
+  - a **command** step: exact command line, captured output (hashed, capped at
+    256 KB), exit code;
+  - a **manual** step (`vera manual`): a GUI/tool action with no command line —
+    Timeline Explorer, Registry Explorer, an EDR console — recorded as the tool
+    name plus a reproducible procedure, with a screenshot standing in for the
+    output.
+- **Screenshots / attachments** — pasted (Ctrl+V in the web UI), dropped,
+  uploaded, or attached from the CLI (`vera attach`, `--shot`). They hang off
+  any action, finding, or evidence item; each is SHA-256 hashed and stored
+  **inside the .vera file**, so the case stays a single portable artifact. A
+  screenshot's role is either `output` (a step's result) or `exhibit` (proof on
+  a finding or evidence item).
 - **Finding** (`F#`) — something an action showed you. Typed (`malware`,
   `account`, `host`, `netindicator`, `hostindicator`, `event`, `note`) with
   type-specific fields, an optional **event time** (when it happened in the
-  incident — drives the Timeline), and a star for key findings.
+  incident — drives the Timeline), optional **file hashes** (MD5 / SHA-1 /
+  SHA-256, validated and lowercased; `vera f … --hash-file evil.exe` computes
+  all three), and a star for key findings.
+- **Host** (`H#`) — a system in the investigation, held in a **registry** with
+  aliases (so `WS03`, `ws03`, and `WS03.corp` are one host). The registry is the
+  hub: evidence links to its **source host(s)**, an action to the **host(s) it
+  examined**, and a finding to the **host(s) it affects** — all by *selecting*
+  from the registry, never by retyping. A finding on 2+ hosts becomes a
+  **cross-host finding** with a *stack count* — the same indicator on 30 hosts
+  is one finding, not 30; `vera stack` lists them rarest-first for
+  least-frequency-of-occurrence triage. Host links are optional (host-agnostic
+  work needs none).
+- **Collection** (`C#`) — a batch/sweep (e.g. a 40-host artifact export) with
+  its provenance (tool, operator, scope). Evidence and actions can belong to one.
 - **Drill-down** — `vera run ... --from F3` links a new action to the finding
   that prompted it. That chain *is* the investigation.
 
@@ -76,19 +131,37 @@ original run.
 - **Investigation** — the collapsible action→finding→action tree; add
   actions/findings and edit anything inline
 - **Timeline** — every finding with an event time, in incident order
+- **Stack** — cross-host findings, rarest first (least-frequency triage)
+- **Hosts** — an **inline-editable** registry grid: click any cell, tab between
+  fields, changes autosave as you go. The blank row at the bottom adds a host
+  (paste a newline/comma list to add many at once); ✕ removes one. Per-host
+  finding counts click through to what affects each host.
 - **Category tabs** — Compromised Hosts / Accounts, Malware & Tools,
   Network / Host Indicators, generated automatically from finding types
-- **Evidence** — items and hashes
+- **Evidence** — items and hashes, plus collections/batches
 - **Export .md** button for the replay report
+
+Findings carry an **affected-hosts** tag control; a `🖥 N hosts` chip on any
+cross-host finding jumps to the registry.
+
+## Nothing is ever purged
+
+"Deleting" in vera is a soft-delete: the row gets a `deleted_at` timestamp and
+is hidden from views, exports, and counts, but the data is never removed from
+the case file. This holds for hosts and screenshots/attachments today, and any
+future delete follows the same rule — a case file remains a complete record of
+everything that was ever entered.
 
 ## Exports
 
-- `vera export md` — full replayable report: evidence + hashes, every action
-  in order with commands and captured output, nested findings, timeline, and
-  category appendices.
-- `vera export csv` — one CSV per classic IR-spreadsheet sheet, same column
-  headers.
-- `vera export json` — complete structured dump.
+- `vera export md` — full replayable report: hosts + collections, evidence +
+  hashes, every action in order with commands and captured output, nested
+  findings, timeline, a cross-host-indicator appendix (rarest first), and the
+  classic category appendices.
+- `vera export csv` — one CSV per classic IR-spreadsheet sheet (same column
+  headers), plus `Hosts.csv` and `CrossHostFindings.csv`.
+- `vera export json` — complete structured dump (hosts, collections, findings
+  with their affected-host sets, and attachment manifest).
 
 ## Active case
 

@@ -34,6 +34,10 @@ def _attrs(f: dict) -> dict:
     return f.get("attrs") or {}
 
 
+def _hash(f: dict, algo: str) -> str:
+    return (f.get("hashes") or {}).get(algo, "")
+
+
 FINDING_TYPES: dict[str, FindingType] = {}
 
 
@@ -95,11 +99,13 @@ _register(FindingType(
     ),
     csv_name="MalwareAndTools",
     csv_headers=("File Name", "Path", "File Size", "Creation Time",
-                 "Modification Time", "Host", "Description"),
+                 "Modification Time", "Host", "Description",
+                 "MD5", "SHA-1", "SHA-256"),
     csv_row=lambda f: [_attrs(f).get("filename") or f.get("title", ""),
                        _attrs(f).get("path", ""), _attrs(f).get("size", ""),
                        _attrs(f).get("created", ""), _attrs(f).get("modified", ""),
-                       f.get("host", ""), f.get("detail", "")],
+                       f.get("host", ""), f.get("detail", ""),
+                       _hash(f, "md5"), _hash(f, "sha1"), _hash(f, "sha256")],
 ))
 
 _register(FindingType(
@@ -157,3 +163,7 @@ def all_attr_fields() -> dict[str, Field]:
         for fld in ft.fields:
             out.setdefault(fld.key, fld)
     return out
+
+
+# Hash algorithms carried on findings, in display order: (attrs key, label).
+HASH_FIELDS = (("md5", "MD5"), ("sha1", "SHA-1"), ("sha256", "SHA-256"))

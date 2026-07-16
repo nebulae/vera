@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import mimetypes
 import os
 import subprocess
 import sys
@@ -112,11 +113,45 @@ def cmd_status(args) -> int:
 def cmd_evidence(args) -> int:
     with open_case(args) as case:
         if args.evidence_cmd == "add":
+            collection_id = (case.resolve_collection(args.collection)
+                             if args.collection else None)
+            if _parse_host_list(args.hosts):
+                host_ids = _strict_host_ids(case, args.hosts)
+            elif collection_id is not None:
+                # inherit the collection's hosts when none given explicitly
+                host_ids = case.collection_host_ids(collection_id)
+            else:
+                host_ids = []
             eid = case.add_evidence(args.label, kind=args.kind or "",
                                     source=args.source or "",
                                     sha256=args.sha256 or "",
-                                    notes=args.note or "")
-            print(f"E{eid} added — {args.label}")
+                                    notes=args.note or "",
+                                    collection_id=collection_id,
+                                    host_ids=host_ids)
+            where = f" (collection C{collection_id})" if collection_id else ""
+            on = f" from {len(host_ids)} host(s)" if host_ids else ""
+            print(f"E{eid} added — {args.label}{where}{on}")
+        elif args.evidence_cmd == "edit":
+            kind, eid = db.resolve_ref(args.ref)
+            if kind != "E":
+                raise CaseError("evidence edit expects an evidence ref like E2")
+            fields = {}
+            for attr, col in (("label", "label"), ("kind", "kind"),
+                              ("source", "source"), ("sha256", "sha256"),
+                              ("note", "notes")):
+                val = getattr(args, attr)
+                if val is not None:
+                    fields[col] = val
+            if args.collection is not None:
+                fields["collection_id"] = (None if args.collection.lower() == "none"
+                                           else case.resolve_collection(args.collection))
+            if fields:
+                case.update_evidence(eid, **fields)
+            if args.hosts is not None:
+                case.set_evidence_hosts(eid, _strict_host_ids(case, args.hosts))
+            if not fields and args.hosts is None:
+                raise CaseError("nothing to change — pass --label/--kind/--sha256/…")
+            print(f"E{eid} updated")
         else:
             items = case.evidence()
             if not items:
@@ -125,6 +160,10 @@ def cmd_evidence(args) -> int:
                 line = f"E{e['id']}  {e['label']}"
                 if e["kind"]:
                     line += f"  [{e['kind']}]"
+                if e.get("hosts"):
+                    line += "  @" + ",".join(h["name"] for h in e["hosts"])
+                if e.get("collection_id"):
+                    line += f"  C{e['collection_id']}"
                 if e["sha256"]:
                     line += f"  sha256:{e['sha256'][:16]}…"
                 print(line)
@@ -133,13 +172,205 @@ def cmd_evidence(args) -> int:
     return 0
 
 
-def _read_piped_stdin() -> str:
+def cmd_host(args) -> int:
+    with open_case(args) as case:
+        if args.host_cmd == "add":
+            names = list(args.names)
+            if args.from_file:
+                names += _read_host_file(args.from_file)
+            if not names:
+                raise CaseError("give at least one host name (or --from FILE)")
+            added = []
+            for name in names:
+                hid = case.add_host(name, aliases=args.alias or [],
+                                    ip=args.ip or "", os=args.os or "",
+                                    system_type=args.type or "",
+                                    criticality=args.crit or "", notes=args.note or "")
+                added.append((hid, name))
+            for hid, name in added:
+                print(f"H{hid}  {name}")
+            print(f"{len(added)} host(s) registered")
+        elif args.host_cmd == "edit":
+            hid = case.resolve_host(args.ref)
+            fields = {}
+            if args.name is not None:
+                fields["name"] = args.name
+            if args.ip is not None:
+                fields["ip"] = args.ip
+            if args.os is not None:
+                fields["os"] = args.os
+            if args.type is not None:
+                fields["system_type"] = args.type
+            if args.crit is not None:
+                fields["criticality"] = args.crit
+            if args.note is not None:
+                fields["notes"] = args.note
+            if args.alias is not None:
+                fields["aliases"] = args.alias  # replaces the alias list
+            if args.add_alias:
+                cur = next(h for h in case.hosts() if h["id"] == hid)["aliases"]
+                lowered = {a.lower() for a in cur}
+                fields["aliases"] = cur + [a for a in args.add_alias
+                                           if a.lower() not in lowered]
+            if not fields:
+                raise CaseError("nothing to change — pass --name/--ip/--type/…")
+            case.update_host(hid, **fields)
+            print(f"H{hid} updated")
+        elif args.host_cmd == "show":
+            hid = case.resolve_host(args.ref)
+            h = next(h for h in case.hosts() if h["id"] == hid)
+            print(f"H{h['id']}  {h['name']}")
+            if h["aliases"]:
+                print(f"  aliases: {', '.join(h['aliases'])}")
+            for key, label in (("ip", "ip"), ("os", "os"),
+                               ("system_type", "type"),
+                               ("criticality", "criticality"), ("notes", "notes")):
+                if h[key]:
+                    print(f"  {label}: {h[key]}")
+            findings = case.findings_for_host(hid)
+            print(f"  findings affecting this host: {len(findings)}")
+            for f in findings:
+                print(f"    F{f['id']} [{f['ftype']}] {f['title']}")
+        else:
+            hosts = case.hosts()
+            if not hosts:
+                print("no hosts registered — add with 'vera host add WS01 WS02 …'")
+            for h in hosts:
+                extra = f"  {h['ip']}" if h["ip"] else ""
+                extra += f"  {h['os']}" if h["os"] else ""
+                extra += f"  [{h['system_type']}]" if h["system_type"] else ""
+                print(f"H{h['id']:>3}  {h['name']:<20}{extra}  "
+                      f"({h['finding_count']} findings)")
+    return 0
+
+
+def cmd_collection(args) -> int:
+    with open_case(args) as case:
+        if args.collection_cmd == "add":
+            host_ids = _strict_host_ids(case, args.hosts)
+            cid = case.add_collection(args.name, tool=args.tool or "",
+                                      operator=args.operator or "",
+                                      collected_at=args.at or "",
+                                      scope=args.scope or "", notes=args.note or "",
+                                      host_ids=host_ids)
+            on = f" — {len(host_ids)} host(s)" if host_ids else ""
+            print(f"C{cid} added — {args.name}{on}")
+        elif args.collection_cmd == "edit":
+            cid = case.resolve_collection(args.ref)
+            fields = {}
+            for attr, col in (("name", "name"), ("tool", "tool"),
+                              ("operator", "operator"), ("at", "collected_at"),
+                              ("scope", "scope"), ("note", "notes")):
+                val = getattr(args, attr)
+                if val is not None:
+                    fields[col] = val
+            if fields:
+                case.update_collection(cid, **fields)
+            if args.hosts is not None:
+                case.set_collection_hosts(cid, _strict_host_ids(case, args.hosts))
+            if not fields and args.hosts is None:
+                raise CaseError("nothing to change — pass --name/--hosts/…")
+            print(f"C{cid} updated")
+        else:
+            cols = case.collections()
+            if not cols:
+                print("no collections — add with 'vera collection add \"name\"'")
+            for col in cols:
+                line = f"C{col['id']}  {col['name']}"
+                if col["tool"]:
+                    line += f"  [{col['tool']}]"
+                if col.get("hosts"):
+                    line += f"  🖥 {len(col['hosts'])} host(s)"
+                if col["scope"]:
+                    line += f"  — {col['scope']}"
+                print(line)
+    return 0
+
+
+def _read_host_file(path: str) -> list[str]:
     try:
-        if sys.stdin is not None and not sys.stdin.isatty():
-            return sys.stdin.read()
+        with open(path) as fh:
+            return [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
+    except OSError as exc:
+        raise CaseError(f"cannot read {path}: {exc}") from None
+
+
+def _parse_host_list(raw: list[str] | None) -> list[str]:
+    """Accept repeated --hosts and comma/space-separated values."""
+    out: list[str] = []
+    for chunk in (raw or []):
+        for part in chunk.replace(",", " ").split():
+            if part:
+                out.append(part)
+    return out
+
+
+def _read_piped_stdin() -> str:
+    """Capture piped stdin, but never block when nothing was piped.
+
+    `cmd | vera run "cmd"` should capture the output; a bare `vera run "cmd"`
+    in a terminal or a script must not hang waiting on stdin. We only read
+    when the stream is non-interactive *and* has data ready to read.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return ""
+        import select
+        ready, _, _ = select.select([sys.stdin], [], [], 0.0)
+        if not ready:
+            return ""
+        return sys.stdin.read()
     except (OSError, ValueError):
-        pass
-    return ""
+        return ""
+
+
+def _guess_mime(path: str) -> str:
+    mime, _ = mimetypes.guess_type(path)
+    return mime or "application/octet-stream"
+
+
+def _read_file(path: str) -> bytes:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError as exc:
+        raise CaseError(f"cannot read {path}: {exc}") from None
+
+
+def _attach_files(case: Case, owner_type: str, owner_id: int,
+                  paths: list[str] | None, role: str) -> None:
+    for path in paths or []:
+        data = _read_file(path)
+        att = case.add_attachment(owner_type, owner_id, data,
+                                  filename=os.path.basename(path),
+                                  mime=_guess_mime(path), role=role)
+        print(f"   📎 attached {os.path.basename(path)} "
+              f"(#{att}, {len(data)} bytes)")
+
+
+def _strict_host_ids(case: Case, raw: list[str] | None) -> list[int]:
+    """Resolve --hosts refs against the registry; never auto-create."""
+    refs = _parse_host_list(raw)
+    ids = []
+    for ref in refs:
+        try:
+            ids.append(case.resolve_host(ref, create=False))
+        except CaseError:
+            raise CaseError(
+                f"no host matches {ref!r} — add it first with 'vera host add "
+                f"{ref}'") from None
+    return ids
+
+
+def _action_host_ids(case: Case, hosts_arg, evidence_id) -> list[int]:
+    """Strict --hosts if given; otherwise inherit the evidence's source hosts."""
+    if _parse_host_list(hosts_arg):
+        return _strict_host_ids(case, hosts_arg)
+    if evidence_id is not None:
+        for ev in case.evidence():
+            if ev["id"] == evidence_id:
+                return [h["id"] for h in ev.get("hosts", [])]
+    return []
 
 
 def cmd_run(args) -> int:
@@ -164,15 +395,46 @@ def cmd_run(args) -> int:
                 raise CaseError("--from expects a finding reference like F3")
         evidence_id = (case.resolve_evidence(args.evidence)
                        if args.evidence else None)
+        collection_id = (case.resolve_collection(args.collection)
+                         if args.collection else None)
+        host_ids = _action_host_ids(case, args.hosts, evidence_id)
         a = case.add_action(args.command, host=args.host or "",
                             tool=args.tool or "", evidence_id=evidence_id,
-                            output=output, exit_code=exit_code,
-                            notes=args.note or "", parent_finding_id=parent)
+                            collection_id=collection_id, output=output,
+                            exit_code=exit_code, notes=args.note or "",
+                            parent_finding_id=parent, host_ids=host_ids)
         where = f" (follow-up to {fid(parent)})" if parent else ""
         captured = f", {len(output)} chars captured" if output else ""
-        print(f"{aid(a)} recorded{where}{captured}")
+        on = f" on {len(host_ids)} host(s)" if host_ids else ""
+        print(f"{aid(a)} recorded{where}{captured}{on}")
         if exit_code not in (None, 0):
             print(f"   exit code {exit_code}")
+        _attach_files(case, "action", a, args.shot, "output")
+    return 0
+
+
+def cmd_manual(args) -> int:
+    """Log a GUI/tool step (no command line) — reproducible as a procedure."""
+    with open_case(args) as case:
+        parent = None
+        if args.from_finding:
+            kind, parent = db.resolve_ref(args.from_finding)
+            if kind != "F":
+                raise CaseError("--from expects a finding reference like F3")
+        evidence_id = (case.resolve_evidence(args.evidence)
+                       if args.evidence else None)
+        collection_id = (case.resolve_collection(args.collection)
+                         if args.collection else None)
+        host_ids = _action_host_ids(case, args.hosts, evidence_id)
+        a = case.add_action(method="manual", tool=args.tool,
+                            procedure=args.procedure, host=args.host or "",
+                            evidence_id=evidence_id, collection_id=collection_id,
+                            notes=args.note or "", parent_finding_id=parent,
+                            host_ids=host_ids)
+        where = f" (follow-up to {fid(parent)})" if parent else ""
+        on = f" on {len(host_ids)} host(s)" if host_ids else ""
+        print(f"{aid(a)} recorded [manual · {args.tool}]{where}{on}")
+        _attach_files(case, "action", a, args.shot, "output")
     return 0
 
 
@@ -188,6 +450,18 @@ def _collect_attrs(args) -> dict:
         k, v = pair.split("=", 1)
         attrs[k.strip()] = v
     return attrs
+
+
+def _collect_hashes(args) -> dict:
+    """Gather --md5/--sha1/--sha256, or compute all three from --hash-file."""
+    hashes = {}
+    if getattr(args, "hash_file", None):
+        hashes.update(db.hash_file(args.hash_file))
+    for algo in db.HASH_SPECS:
+        val = getattr(args, algo, None)
+        if val:
+            hashes[algo] = val
+    return db.normalize_hashes(hashes)
 
 
 def cmd_finding(args) -> int:
@@ -207,29 +481,94 @@ def cmd_finding(args) -> int:
                 raise CaseError(
                     "no actions in case yet — log one with 'vera run', "
                     "or use --on none for a standalone finding")
+        host_refs = _parse_host_list(args.hosts)
+        if host_refs:
+            host_ids = _strict_host_ids(case, args.hosts)
+        elif action_id is not None:
+            # inherit the action's host(s) when none are given explicitly
+            host_ids = [h["id"] for h in case.get_action(action_id).get("hosts", [])]
+        else:
+            host_ids = None
+        hashes = _collect_hashes(args)
         f = case.add_finding(args.title, ftype=args.type, action_id=action_id,
                              host=args.host or "", detail=args.detail or "",
                              event_time=args.time or "",
-                             attrs=_collect_attrs(args), starred=args.star)
+                             attrs=_collect_attrs(args), starred=args.star,
+                             host_ids=host_ids or None, hashes=hashes)
         label = types.FINDING_TYPES[args.type].label
         under = f" under {aid(action_id)}" if action_id else " (unattached)"
-        print(f"{fid(f)} [{label}] added{under}")
+        stack = f" — affects {len(host_ids)} host(s)" if host_ids else ""
+        print(f"{fid(f)} [{label}] added{under}{stack}")
+        if hashes:
+            print("   " + "  ".join(f"{a}:{v[:12]}…" for a, v in hashes.items()))
+        _attach_files(case, "finding", f, args.shot, "exhibit")
     return 0
 
 
+def cmd_stack(args) -> int:
+    with open_case(args) as case:
+        rows = case.stack_findings()
+        if not rows:
+            print("no cross-host findings yet — add one with "
+                  "'vera finding \"…\" --hosts WS01,WS02,…'")
+            return 0
+        print("Cross-host findings (rarest first — least frequency of occurrence):")
+        for f in rows:
+            names = ", ".join(h["name"] for h in f["affected_hosts"])
+            print(f"  {fid(f['id'])}  ({f['stack']:>2} hosts)  {f['title']}")
+            print(f"          {c('2', names)}")
+    return 0
+
+
+def cmd_attach(args) -> int:
+    kind, ref_id = db.resolve_ref(args.ref)
+    owner = {"A": "action", "F": "finding", "E": "evidence"}[kind]
+    data = _read_file(args.file)
+    with open_case(args) as case:
+        att = case.add_attachment(owner, ref_id, data,
+                                  filename=os.path.basename(args.file),
+                                  mime=_guess_mime(args.file), role=args.role,
+                                  caption=args.caption or "")
+        print(f"📎 attached {os.path.basename(args.file)} to {args.ref.upper()} "
+              f"(attachment #{att}, {len(data)} bytes, role {args.role})")
+    return 0
+
+
+def _print_attachments(atts: list[dict]) -> None:
+    for at in atts:
+        cap = f" — {at['caption']}" if at["caption"] else ""
+        print(f"  📎 #{at['id']} [{at['role']}] {at['filename']} "
+              f"({at['size']} bytes, sha256 {at['sha256'][:16]}…){cap}")
+
+
 def cmd_show(args) -> int:
+    if args.ref[:1].upper() == "H":
+        return cmd_host(argparse.Namespace(
+            host_cmd="show", ref=args.ref, case=getattr(args, "case", None)))
     kind, ref_id = db.resolve_ref(args.ref)
     with open_case(args) as case:
         if kind == "A":
             a = case.get_action(ref_id)
             print(f"{aid(a['id'])}  {a['performed_at']}")
-            print(f"  command: {a['command']}")
-            for key, label in (("tool", "tool"), ("host", "host"),
-                               ("notes", "notes")):
-                if a[key]:
-                    print(f"  {label}: {a[key]}")
+            if a["method"] == "manual":
+                print(f"  tool: {a['tool']}  (manual step)")
+                if a["procedure"]:
+                    print(f"  procedure: {a['procedure']}")
+            else:
+                print(f"  command: {a['command']}")
+                if a["tool"]:
+                    print(f"  tool: {a['tool']}")
+            if a.get("hosts"):
+                print("  hosts: " + ", ".join(f"{h['name']}(H{h['id']})"
+                                               for h in a["hosts"]))
+            elif a["host"]:
+                print(f"  host: {a['host']}")
+            if a["notes"]:
+                print(f"  notes: {a['notes']}")
             if a["evidence_id"]:
                 print(f"  evidence: E{a['evidence_id']}")
+            if a.get("collection_id"):
+                print(f"  collection: C{a['collection_id']}")
             if a["parent_finding_id"]:
                 print(f"  follow-up to: F{a['parent_finding_id']}")
             if a["exit_code"] is not None:
@@ -239,6 +578,7 @@ def cmd_show(args) -> int:
                 print(f"  output{trunc}, sha256 {a['output_sha256'][:16]}…:")
                 for line in a["output"].splitlines():
                     print(f"    {line}")
+            _print_attachments(a["attachments"])
         elif kind == "F":
             f = case.get_finding(ref_id)
             ft = types.FINDING_TYPES.get(f["ftype"])
@@ -251,22 +591,51 @@ def cmd_show(args) -> int:
             for k, v in f["attrs"].items():
                 if v:
                     print(f"  {k}: {v}")
+            for algo in db.HASH_SPECS:
+                if f.get("hashes", {}).get(algo):
+                    print(f"  {algo}: {f['hashes'][algo]}")
+            if f.get("affected_hosts"):
+                names = ", ".join(h["name"] for h in f["affected_hosts"])
+                print(f"  affected hosts ({f['stack']}): {names}")
             if f["action_id"]:
                 print(f"  found via: A{f['action_id']}")
-        else:
-            raise CaseError("show expects A<n> or F<n>")
+            _print_attachments(f["attachments"])
+        elif kind == "E":
+            items = [e for e in case.evidence() if e["id"] == ref_id]
+            if not items:
+                raise CaseError(f"E{ref_id} does not exist")
+            e = items[0]
+            print(f"E{e['id']}  {e['label']}")
+            for key, label in (("kind", "kind"), ("source", "source"),
+                               ("sha256", "sha256"), ("notes", "notes")):
+                if e[key]:
+                    print(f"  {label}: {e[key]}")
+            if e.get("collection_id"):
+                print(f"  collection: C{e['collection_id']}")
+            _print_attachments(e["attachments"])
     return 0
 
 
 def _tree_lines(case: Case) -> list[str]:
     lines: list[str] = []
 
+    def _shots(node: dict, pad: str) -> None:
+        n = len(node.get("attachments") or [])
+        if n:
+            lines.append(f"{pad}   {c('2', f'📎 {n} screenshot(s)')}")
+
     def emit_action(a: dict, depth: int) -> None:
         pad = "  " * depth
-        host = f" @{a['host']}" if a["host"] else ""
-        lines.append(f"{pad}{aid(a['id'])}{host}  $ {a['command']}")
+        names = ",".join(h["name"] for h in a.get("hosts", [])) or a["host"]
+        host = f" @{names}" if names else ""
+        if a.get("method") == "manual":
+            body = f"🔧 {a['tool']}: {a['procedure']}"
+        else:
+            body = f"$ {a['command']}"
+        lines.append(f"{pad}{aid(a['id'])}{host}  {body}")
         if a["notes"]:
             lines.append(f"{pad}   {c('2', a['notes'])}")
+        _shots(a, pad)
         for f in a["findings"]:
             emit_finding(f, depth + 1)
 
@@ -276,7 +645,9 @@ def _tree_lines(case: Case) -> list[str]:
         tag = ft.label if ft else f["ftype"]
         star = " ★" if f["starred"] else ""
         when = f" ({f['event_time']})" if f["event_time"] else ""
-        lines.append(f"{pad}{fid(f['id'])} [{tag}]{star} {f['title']}{when}")
+        stack = f" 🖥 {f['stack']} hosts" if f.get("stack", 0) > 1 else ""
+        lines.append(f"{pad}{fid(f['id'])} [{tag}]{star} {f['title']}{when}{c('2', stack)}")
+        _shots(f, pad)
         for a in f["actions"]:
             emit_action(a, depth + 1)
 
@@ -369,9 +740,16 @@ def cmd_export(args) -> int:
 
 def cmd_serve(args) -> int:
     from . import server
-    path = active_case_path(getattr(args, "case", None))
-    Case(path).close()  # fail fast on a bad path before binding the port
-    return server.serve(path, port=args.port, open_browser=not args.no_browser)
+    path = None
+    if not args.new:
+        try:
+            path = active_case_path(getattr(args, "case", None))
+            Case(path).close()  # fail fast on a bad path before binding the port
+        except CaseError:
+            path = None  # no active case -> start on the New Investigation screen
+    case_dir = args.dir or (os.path.dirname(path) if path else os.getcwd())
+    return server.serve(path, port=args.port, open_browser=not args.no_browser,
+                        case_dir=case_dir)
 
 
 # -- parser ------------------------------------------------------------------
@@ -416,23 +794,133 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--kind", help="disk / memory / triage / logs ...")
     pa.add_argument("--source", help="original path or acquisition detail")
     pa.add_argument("--sha256")
+    pa.add_argument("--collection", metavar="REF",
+                    help="collection/batch this evidence belongs to (C2 or name)")
+    pa.add_argument("--hosts", action="append", metavar="LIST",
+                    help="source host(s) this evidence came from — registry refs "
+                         "(RD03 / H3), comma/space list, must already exist")
     pa.add_argument("--note")
+    pe = esub.add_parser("edit", help="edit an evidence item")
+    pe.add_argument("ref", help="E2")
+    pe.add_argument("--label")
+    pe.add_argument("--kind")
+    pe.add_argument("--source")
+    pe.add_argument("--sha256")
+    pe.add_argument("--note", help="notes")
+    pe.add_argument("--collection", metavar="REF",
+                    help="collection ref (C2 / name), or 'none' to detach")
+    pe.add_argument("--hosts", action="append", metavar="LIST",
+                    help="replace source host(s) — registry refs, comma/space list")
     esub.add_parser("list", help="list evidence")
     p.set_defaults(func=cmd_evidence)
+
+    p = sub.add_parser("host", help="manage the host registry")
+    hsub = p.add_subparsers(dest="host_cmd", required=True)
+    ha = hsub.add_parser("add", help="register one or more hosts")
+    ha.add_argument("names", nargs="*", help="host name(s), e.g. WS01 WS02 WS03")
+    ha.add_argument("--from", dest="from_file", metavar="FILE",
+                    help="read host names, one per line, from a file")
+    ha.add_argument("--alias", action="append", help="alias (repeatable)")
+    ha.add_argument("--ip")
+    ha.add_argument("--os", help="operating system, e.g. 'Windows 11'")
+    ha.add_argument("--type", help="workstation / DC / server ...")
+    ha.add_argument("--crit", help="criticality tag")
+    ha.add_argument("--note")
+    he = hsub.add_parser("edit", help="edit a host after adding it")
+    he.add_argument("ref", help="H3, a host name, or an alias")
+    he.add_argument("--name", help="rename the host")
+    he.add_argument("--ip")
+    he.add_argument("--os", help="operating system, e.g. 'Windows 11'")
+    he.add_argument("--type", help="workstation / DC / server ...")
+    he.add_argument("--crit", help="criticality tag")
+    he.add_argument("--note", help="notes")
+    he.add_argument("--alias", action="append",
+                    help="replace the alias list (repeatable)")
+    he.add_argument("--add-alias", action="append", dest="add_alias",
+                    help="append an alias without dropping existing ones (repeatable)")
+    hs = hsub.add_parser("show", help="show a host and the findings affecting it")
+    hs.add_argument("ref", help="H3, a host name, or an alias")
+    hsub.add_parser("list", help="list registered hosts")
+    p.set_defaults(func=cmd_host)
+
+    p = sub.add_parser("collection", help="manage collections/batches (a sweep)")
+    csub = p.add_subparsers(dest="collection_cmd", required=True)
+    ca = csub.add_parser("add", help="register a collection/batch")
+    ca.add_argument("name", help="e.g. 'Lab2 amcache+shimcache export'")
+    ca.add_argument("--tool", help="AmcacheParser / KAPE / Velociraptor ...")
+    ca.add_argument("--operator")
+    ca.add_argument("--at", help="when it was collected")
+    ca.add_argument("--scope", help="e.g. '40 hosts, amcache+shimcache'")
+    ca.add_argument("--hosts", action="append", metavar="LIST",
+                    help="host(s) this collection covers — registry refs, comma/"
+                         "space list. Evidence added to it inherits these.")
+    ca.add_argument("--note")
+    ce = csub.add_parser("edit", help="edit a collection")
+    ce.add_argument("ref", help="C1")
+    ce.add_argument("--name")
+    ce.add_argument("--tool")
+    ce.add_argument("--operator")
+    ce.add_argument("--at")
+    ce.add_argument("--scope")
+    ce.add_argument("--note", help="notes")
+    ce.add_argument("--hosts", action="append", metavar="LIST",
+                    help="replace the collection's host set — registry refs")
+    csub.add_parser("list", help="list collections")
+    p.set_defaults(func=cmd_collection)
+
+    p = sub.add_parser("stack", help="cross-host findings, rarest first "
+                                     "(least-frequency-of-occurrence triage)")
+    p.set_defaults(func=cmd_stack)
 
     p = sub.add_parser("run", help="log a command/tool you ran "
                                    "(pipe its output in to capture it)")
     p.add_argument("command", help="the exact command line")
     p.add_argument("-x", "--execute", action="store_true",
                    help="have vera execute the command and capture its output")
-    p.add_argument("--host", help="host/system the command targets")
+    p.add_argument("--hosts", action="append", metavar="LIST",
+                   help="host(s) examined — registry refs (RD03 / H3), comma/space "
+                        "list, must already exist ('vera host add' first)")
+    p.add_argument("--host", help=argparse.SUPPRESS)  # deprecated free-text label
     p.add_argument("--tool", help="tool name (default: first word of command)")
     p.add_argument("--evidence", metavar="REF",
                    help="evidence used (E2 or label substring)")
+    p.add_argument("--collection", metavar="REF",
+                   help="collection/batch this action ran against (C2 or name)")
     p.add_argument("--from", dest="from_finding", metavar="F#",
                    help="finding that prompted this action")
     p.add_argument("--note")
+    p.add_argument("--shot", action="append", metavar="FILE",
+                   help="screenshot to attach as output (repeatable)")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("manual", help="log a GUI/tool step with no command line "
+                                      "(e.g. Registry Explorer, Timeline Explorer)")
+    p.add_argument("procedure", help="what you did in the tool (the reproducible steps)")
+    p.add_argument("--tool", required=True,
+                   help="the tool used, e.g. 'Registry Explorer'")
+    p.add_argument("--hosts", action="append", metavar="LIST",
+                   help="host(s) examined — registry refs (RD03 / H3), comma/space "
+                        "list, must already exist")
+    p.add_argument("--host", help=argparse.SUPPRESS)  # deprecated free-text label
+    p.add_argument("--evidence", metavar="REF",
+                   help="evidence used (E2 or label substring)")
+    p.add_argument("--collection", metavar="REF",
+                   help="collection/batch this step ran against (C2 or name)")
+    p.add_argument("--from", dest="from_finding", metavar="F#",
+                   help="finding that prompted this step")
+    p.add_argument("--note")
+    p.add_argument("--shot", action="append", metavar="FILE",
+                   help="screenshot to attach as output (repeatable)")
+    p.set_defaults(func=cmd_manual)
+
+    p = sub.add_parser("attach", help="attach a screenshot/file to A#, F#, or E#")
+    p.add_argument("ref", help="A4, F2, or E1")
+    p.add_argument("file", help="path to the image/file")
+    p.add_argument("--role", choices=("output", "exhibit"), default="exhibit",
+                   help="'output' = a step's captured result; 'exhibit' = proof "
+                        "(default: exhibit)")
+    p.add_argument("--caption")
+    p.set_defaults(func=cmd_attach)
 
     for name in ("finding", "f"):
         p = sub.add_parser(name, help="record a finding "
@@ -443,19 +931,30 @@ def build_parser() -> argparse.ArgumentParser:
                        help="one of: " + ", ".join(types.FINDING_TYPES))
         p.add_argument("--on", metavar="A#",
                        help="action that produced it (default: last; 'none' to detach)")
-        p.add_argument("--host")
+        p.add_argument("--host", help=argparse.SUPPRESS)  # deprecated free-text
+        p.add_argument("--hosts", action="append", metavar="LIST",
+                       help="affected host(s) — registry refs (RD03 / H3), comma/"
+                            "space list, must already exist. Omit to inherit the "
+                            "action's host(s). 2+ stacks the finding across hosts.")
         p.add_argument("--time", help="when it happened in the incident "
                                       "(drives the timeline)")
         p.add_argument("-d", "--detail", help="longer description")
+        p.add_argument("--md5", help="MD5 of the file this finding is about")
+        p.add_argument("--sha1", help="SHA-1 of the file")
+        p.add_argument("--sha256", help="SHA-256 of the file")
+        p.add_argument("--hash-file", dest="hash_file", metavar="PATH",
+                       help="compute md5+sha1+sha256 from a local file")
         p.add_argument("--star", action="store_true", help="mark as key finding")
+        p.add_argument("--shot", action="append", metavar="FILE",
+                       help="screenshot to attach as exhibit (repeatable)")
         _add_attr_flags(p)
         p.set_defaults(func=cmd_finding)
 
     p = sub.add_parser("log", help="show the investigation tree")
     p.set_defaults(func=cmd_log)
 
-    p = sub.add_parser("show", help="show one action or finding in full")
-    p.add_argument("ref", help="A4 or F2")
+    p = sub.add_parser("show", help="show an action, finding, evidence, or host")
+    p.add_argument("ref", help="A4, F2, E1, or H3")
     p.set_defaults(func=cmd_show)
 
     p = sub.add_parser("edit", help="amend an action or finding")
@@ -485,6 +984,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("serve", help="open the web viewer")
     p.add_argument("--port", type=int, default=8845)
     p.add_argument("--no-browser", action="store_true")
+    p.add_argument("--dir", metavar="DIR",
+                   help="folder of .vera cases for the New Investigation screen "
+                        "(default: active case's folder, else current dir)")
+    p.add_argument("--new", action="store_true",
+                   help="open the New Investigation screen even if a case is active")
     p.set_defaults(func=cmd_serve)
 
     return parser

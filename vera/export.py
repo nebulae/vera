@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 
 from . import types
 from .db import Case, CaseError
@@ -16,7 +17,7 @@ def export(case: Case, fmt: str, out_dir: str) -> list[str]:
     if fmt == "json":
         return [_export_json(case, os.path.join(out_dir, f"{stem}.json"))]
     if fmt == "md":
-        return [_export_md(case, os.path.join(out_dir, f"{stem}.md"))]
+        return _export_md(case, out_dir, stem)
     if fmt == "csv":
         return _export_csv(case, out_dir, stem)
     raise CaseError(f"unknown export format {fmt!r}")
@@ -27,10 +28,14 @@ def export(case: Case, fmt: str, out_dir: str) -> list[str]:
 def case_dump(case: Case) -> dict:
     return {
         "vera_case": case.meta(),
+        "hosts": case.hosts(),
+        "collections": case.collections(),
         "evidence": case.evidence(),
         "actions": [dict(case.get_action(a["id"]))
                     for a in _flat_actions(case)],
-        "findings": case.findings(),
+        "findings": case.findings(),  # each carries affected_hosts + stack
+        # attachment metadata only; the image bytes live inside the .vera file
+        "attachments": case.all_attachments(),
     }
 
 
@@ -66,18 +71,83 @@ def _export_csv(case: Case, out_dir: str, stem: str) -> list[str]:
             continue
         rows = [ft.csv_row(f) for f in case.findings(ft.key)]
         sheet(ft.csv_name, ft.csv_headers, rows)
+
+    hosts = case.hosts()
+    if hosts:
+        sheet("Hosts", ("Host", "IP", "System Type", "Criticality",
+                        "Aliases", "Findings"),
+              [[h["name"], h["ip"], h["system_type"], h["criticality"],
+                ", ".join(h["aliases"]), h["finding_count"]] for h in hosts])
+
+    stack = case.stack_findings()
+    if stack:
+        sheet("CrossHostFindings",
+              ("Ref", "Title", "Type", "Host Count", "Affected Hosts"),
+              [[f"F{f['id']}", f["title"], f["ftype"], f["stack"],
+                ", ".join(h["name"] for h in f["affected_hosts"])] for f in stack])
     return written
 
 
 # -- markdown (the replay document) --------------------------------------------
 
-def _export_md(case: Case, path: str) -> str:
+def _safe_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "file"
+
+
+class _ApiImageLinker:
+    """Link attachments to the running server (for the in-browser md view)."""
+
+    def __call__(self, att: dict) -> str:
+        return f"/api/attachments/{att['id']}"
+
+
+class _FileImageWriter:
+    """Write attachment bytes into a sibling folder and link them relatively."""
+
+    def __init__(self, case: Case, out_dir: str, rel_prefix: str):
+        self.case = case
+        self.dir = os.path.join(out_dir, rel_prefix)
+        self.rel = rel_prefix
+        self._made = False
+        self.written: list[str] = []
+
+    def __call__(self, att: dict) -> str:
+        if not self._made:
+            os.makedirs(self.dir, exist_ok=True)
+            self._made = True
+        data, _mime, filename = self.case.attachment_blob(att["id"])
+        name = f"{att['id']}_{_safe_name(filename or 'attachment')}"
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        self.written.append(path)
+        return f"{self.rel}/{name}"
+
+
+def _md_attachments(w, atts: list[dict], linker) -> None:
+    for at in atts or []:
+        cap = at["caption"] or at["filename"] or f"attachment {at['id']}"
+        href = linker(at)
+        if at["mime"].startswith("image/"):
+            w(f"![{_mdcell(cap)}]({href})")
+            w(f"<sub>📎 {_mdcell(cap)} — sha256 <code>{at['sha256'][:16]}…</code></sub>")
+        else:
+            w(f"- 📎 [{_mdcell(cap)}]({href}) — sha256 `{at['sha256'][:16]}…`")
+        w("")
+
+
+def _export_md(case: Case, out_dir: str, stem: str) -> list[str]:
+    writer = _FileImageWriter(case, out_dir, f"{stem}_attachments")
+    md = render_md(case, linker=writer)
+    path = os.path.join(out_dir, f"{stem}.md")
     with open(path, "w") as fh:
-        fh.write(render_md(case))
-    return path
+        fh.write(md)
+    return [path, *writer.written]
 
 
-def render_md(case: Case) -> str:
+def render_md(case: Case, linker=None) -> str:
+    if linker is None:
+        linker = _ApiImageLinker()
     meta = case.meta()
     out: list[str] = []
     w = out.append
@@ -93,24 +163,53 @@ def render_md(case: Case) -> str:
     w(f"- **Created:** {meta.get('created_at', '')}")
     n = case.counts()
     w(f"- **Contents:** {n['actions']} actions, {n['findings']} findings, "
-      f"{n['evidence']} evidence items")
+      f"{n['evidence']} evidence items, {n['hosts']} hosts, "
+      f"{n['collections']} collections")
     w("")
+
+    collections = case.collections()
+    if collections:
+        w("## Collections")
+        w("")
+        w("| # | Name | Tool | Operator | Collected | Scope |")
+        w("|---|------|------|----------|-----------|-------|")
+        for col in collections:
+            w(f"| C{col['id']} | {_mdcell(col['name'])} | {_mdcell(col['tool'])} "
+              f"| {_mdcell(col['operator'])} | {_mdcell(col['collected_at'])} "
+              f"| {_mdcell(col['scope'])} |")
+        w("")
+
+    hosts = case.hosts()
+    if hosts:
+        w("## Hosts")
+        w("")
+        w("| # | Host | IP | Type | Aliases | Findings |")
+        w("|---|------|----|------|---------|----------|")
+        for h in hosts:
+            w(f"| H{h['id']} | {_mdcell(h['name'])} | {_mdcell(h['ip'])} "
+              f"| {_mdcell(h['system_type'])} | {_mdcell(', '.join(h['aliases']))} "
+              f"| {h['finding_count']} |")
+        w("")
 
     evidence = case.evidence()
     w("## Evidence")
     w("")
     if evidence:
-        w("| # | Label | Kind | Source | SHA-256 |")
-        w("|---|-------|------|--------|---------|")
+        w("| # | Label | Kind | Host(s) | Source | SHA-256 |")
+        w("|---|-------|------|---------|--------|---------|")
         for e in evidence:
+            hn = ", ".join(h["name"] for h in e.get("hosts", []))
+            sha = f"`{e['sha256']}`" if e["sha256"] else ""
             w(f"| E{e['id']} | {_mdcell(e['label'])} | {_mdcell(e['kind'])} "
-              f"| {_mdcell(e['source'])} | `{e['sha256']}` |"
-              if e["sha256"] else
-              f"| E{e['id']} | {_mdcell(e['label'])} | {_mdcell(e['kind'])} "
-              f"| {_mdcell(e['source'])} |  |")
+              f"| {_mdcell(hn)} | {_mdcell(e['source'])} | {sha} |")
     else:
         w("_No evidence items recorded._")
     w("")
+    for e in evidence:
+        if e.get("attachments"):
+            w(f"**E{e['id']} {_mdcell(e['label'])} — exhibits**")
+            w("")
+            _md_attachments(w, e["attachments"], linker)
 
     w("## Investigation (replay in order)")
     w("")
@@ -119,13 +218,13 @@ def render_md(case: Case) -> str:
       "findings prompted.")
     w("")
     for action in case.tree():
-        _md_action(w, case, action, depth=3)
+        _md_action(w, case, action, depth=3, linker=linker)
     orphans = case.unattached_findings()
     if orphans:
         w("### Unattached findings")
         w("")
         for f in orphans:
-            _md_finding(w, f, depth=0)
+            _md_finding(w, f, depth=0, linker=linker)
 
     timeline = case.timeline()
     w("## Timeline")
@@ -140,6 +239,21 @@ def render_md(case: Case) -> str:
     else:
         w("_No findings carry an event time yet._")
     w("")
+
+    stack = case.stack_findings()
+    if stack:
+        w("## Cross-host indicators")
+        w("")
+        w("Findings by number of affected hosts, rarest first — least-frequency-"
+          "of-occurrence surfaces the most suspicious indicators at the top.")
+        w("")
+        w("| Ref | Hosts | Title | Affected hosts |")
+        w("|-----|-------|-------|----------------|")
+        for f in stack:
+            names = ", ".join(h["name"] for h in f["affected_hosts"])
+            w(f"| F{f['id']} | {f['stack']} | {_mdcell(f['title'])} "
+              f"| {_mdcell(names)} |")
+        w("")
 
     for ft in types.FINDING_TYPES.values():
         if not ft.csv_name:
@@ -159,10 +273,13 @@ def render_md(case: Case) -> str:
     return "\n".join(out) + "\n"
 
 
-def _md_action(w, case: Case, a: dict, depth: int) -> None:
+def _md_action(w, case: Case, a: dict, depth: int, linker) -> None:
     hdr = "#" * min(depth, 6)
-    host = f" on `{a['host']}`" if a["host"] else ""
-    w(f"{hdr} A{a['id']} — `{a['tool']}`{host}")
+    names = ", ".join(h["name"] for h in a.get("hosts", [])) or a["host"]
+    host = f" on `{names}`" if names else ""
+    manual = a.get("method") == "manual"
+    kind = " (manual step)" if manual else ""
+    w(f"{hdr} A{a['id']} — `{a['tool']}`{host}{kind}")
     w("")
     if a["parent_finding_id"]:
         w(f"_Follow-up to finding F{a['parent_finding_id']}._")
@@ -173,10 +290,20 @@ def _md_action(w, case: Case, a: dict, depth: int) -> None:
     if a["exit_code"] is not None:
         w(f"- **Exit code:** {a['exit_code']}")
     w("")
-    w("```sh")
-    w(a["command"])
-    w("```")
-    w("")
+    if manual:
+        w(f"**Tool:** {a['tool']}")
+        w("")
+        if a["procedure"]:
+            w("**Procedure (to reproduce):**")
+            w("")
+            for line in a["procedure"].splitlines():
+                w(f"> {line}")
+            w("")
+    else:
+        w("```sh")
+        w(a["command"])
+        w("```")
+        w("")
     if a["notes"]:
         w(a["notes"])
         w("")
@@ -191,13 +318,14 @@ def _md_action(w, case: Case, a: dict, depth: int) -> None:
         w("")
         w("</details>")
         w("")
+    _md_attachments(w, a.get("attachments"), linker)
     for f in a["findings"]:
-        _md_finding(w, f, depth)
+        _md_finding(w, f, depth, linker)
         for sub in f["actions"]:
-            _md_action(w, case, sub, min(depth + 1, 6))
+            _md_action(w, case, sub, min(depth + 1, 6), linker)
 
 
-def _md_finding(w, f: dict, depth: int) -> None:
+def _md_finding(w, f: dict, depth: int, linker) -> None:
     ft = types.FINDING_TYPES.get(f["ftype"])
     label = ft.label if ft else f["ftype"]
     star = " ★" if f["starred"] else ""
@@ -212,10 +340,19 @@ def _md_finding(w, f: dict, depth: int) -> None:
             parts.append(f"{k.replace('_', ' ')} `{v}`")
     if parts:
         w("> " + " · ".join(parts))
+    if f.get("stack", 0) > 0:
+        names = ", ".join(h["name"] for h in f["affected_hosts"])
+        w(f">")
+        w(f"> 🖥 **Affected hosts ({f['stack']}):** {_mdcell(names)}")
+    hashes = f.get("hashes") or {}
+    for algo, hlabel in types.HASH_FIELDS:
+        if hashes.get(algo):
+            w(f"> {hlabel}: `{hashes[algo]}`")
     if f["detail"]:
         for line in f["detail"].splitlines():
             w(f"> {line}")
     w("")
+    _md_attachments(w, f.get("attachments"), linker)
 
 
 def _mdcell(text: str) -> str:

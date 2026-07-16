@@ -1064,3 +1064,52 @@ def test_api_coverage_and_expand(running_server):
     rd01 = next(h for h in cov["hosts"] if h["name"] == "RD01")
     assert rd01["evidence"] == 1 and rd01["actions"] == 0
     assert rd01["status"] == "suspicious"
+
+
+def test_action_hosts_derive_from_evidence(case):
+    h1 = case.add_host("RD01")
+    h2 = case.add_host("RD02")
+    e = case.add_evidence("triage", host_ids=[h1, h2])
+    # no host_ids given -> the step inherits the evidence's source hosts
+    a = case.add_action("amcache.py", evidence_id=e)
+    assert {h["name"] for h in case.get_action(a)["hosts"]} == {"RD01", "RD02"}
+    # explicit host_ids still wins
+    a2 = case.add_action("x", evidence_id=e, host_ids=[h1])
+    assert [h["name"] for h in case.get_action(a2)["hosts"]] == ["RD01"]
+    # no evidence -> no hosts
+    a3 = case.add_action("y")
+    assert case.get_action(a3)["hosts"] == []
+
+
+def test_api_action_hosts_follow_evidence(running_server):
+    port = running_server
+    status, raw = _req(port, "POST", "/api/hosts", {"names": ["RD01", "RD02"]})
+    ids = json.loads(raw)["ids"]
+    status, raw = _req(port, "POST", "/api/evidence",
+                       {"label": "RD01 triage", "host_ids": [ids[0]]})
+    e1 = json.loads(raw)["id"]
+    status, raw = _req(port, "POST", "/api/evidence",
+                       {"label": "RD02 triage", "host_ids": [ids[1]]})
+    e2 = json.loads(raw)["id"]
+    # POST without host_ids -> hosts come from the evidence
+    status, raw = _req(port, "POST", "/api/actions",
+                       {"command": "amcache.py", "evidence_id": e1})
+    assert status == 201
+    aid = json.loads(raw)["id"]
+    tree = json.loads(_req(port, "GET", "/api/tree")[1])
+    act = next(a for a in tree["roots"] if a["id"] == aid)
+    assert [h["name"] for h in act["hosts"]] == ["RD01"]
+    # PATCH that re-points the evidence re-syncs the step's hosts
+    status, _ = _req(port, "PATCH", f"/api/actions/{aid}",
+                     {"command": "amcache.py", "evidence_id": e2})
+    assert status == 200
+    tree = json.loads(_req(port, "GET", "/api/tree")[1])
+    act = next(a for a in tree["roots"] if a["id"] == aid)
+    assert [h["name"] for h in act["hosts"]] == ["RD02"]
+    # detaching the evidence clears the derived hosts
+    status, _ = _req(port, "PATCH", f"/api/actions/{aid}",
+                     {"command": "amcache.py", "evidence_id": None})
+    assert status == 200
+    tree = json.loads(_req(port, "GET", "/api/tree")[1])
+    act = next(a for a in tree["roots"] if a["id"] == aid)
+    assert act["hosts"] == []

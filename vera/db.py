@@ -481,12 +481,15 @@ class Case:
             self._require("findings", parent_finding_id, "F")
         if evidence_id is not None:
             self._require("evidence", evidence_id, "E")
-        # an action inherits its collection from the evidence it examines, so the
-        # collection never has to be picked separately
+        # an action inherits its collection AND its hosts from the evidence it
+        # examines — hosts belong to evidence/collections, not individual steps,
+        # so neither has to be picked separately (explicit host_ids still wins)
         if collection_id is None and evidence_id is not None:
             row = self.conn.execute("SELECT collection_id FROM evidence WHERE id = ?",
                                     (evidence_id,)).fetchone()
             collection_id = row["collection_id"] if row else None
+        if not host_ids and evidence_id is not None:
+            host_ids = self.evidence_host_ids(evidence_id)
         if collection_id is not None:
             self._require("collections", collection_id, "C")
         truncated = len(output) > OUTPUT_CAP
@@ -1024,6 +1027,11 @@ class Case:
         return [r["host_id"] for r in self.conn.execute(
             "SELECT host_id FROM finding_hosts WHERE finding_id = ? ORDER BY host_id",
             (finding_id,))]
+
+    def evidence_host_ids(self, evidence_id: int) -> list[int]:
+        return [r["host_id"] for r in self.conn.execute(
+            "SELECT host_id FROM evidence_hosts WHERE evidence_id = ? "
+            "ORDER BY host_id", (evidence_id,))]
 
     def _host_links(self, table: str) -> dict[int, list[dict]]:
         """{owner_id: [{id,name}]} for a host-link table; skips deleted hosts."""

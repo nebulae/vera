@@ -329,6 +329,12 @@ class Handler(BaseHTTPRequestHandler):
                 case.update_action(row_id, **body)
             if has_hosts:
                 case.set_action_hosts(row_id, host_ids)
+            elif "evidence_id" in body:
+                # a step's hosts derive from the evidence it examines — keep
+                # them in sync when the evidence link changes
+                eid = body["evidence_id"]
+                case.set_action_hosts(
+                    row_id, case.evidence_host_ids(eid) if eid else [])
         else:  # evidence: fields and/or host links
             if body:
                 case.update_evidence(row_id, **body)

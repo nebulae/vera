@@ -694,15 +694,27 @@ function actionForm({ parentFindingId, existing, done, close }) {
 
   const toolField = field("Tool", textInput("tool",
     "Registry Explorer, Timeline Explorer …", existing ? existing.tool : ""));
-  const picker = hostPicker(existing ? existing.hosts : [],
-    "Host(s) examined — picking evidence fills these in from its source host(s); adjust as needed.");
 
-  // selecting evidence pulls in its source host(s) — no need to re-select them
+  // hosts belong to evidence/collections, not individual steps — the step's
+  // hosts derive from the evidence it examines, shown here read-only
   const evSelect = el("select", { name: "evidence_id" }, evOptions);
-  evSelect.addEventListener("change", () => {
+  const hostNote = el("div", { class: "hint host-note" });
+  function syncHostNote() {
     const ev = state.info.evidence.find((x) => String(x.id) === evSelect.value);
-    if (ev && ev.hosts && ev.hosts.length) picker.addHosts(ev.hosts);
-  });
+    const names = ((ev && ev.hosts) || []).map((h) => h.name);
+    if (!names.length) {
+      hostNote.textContent = evSelect.value
+        ? "the selected evidence has no source hosts"
+        : "pick the evidence this step examined — its source host(s) apply to the step";
+      return;
+    }
+    const shown = names.slice(0, 10).join(", ");
+    const more = names.length > 10 ? ` +${names.length - 10} more` : "";
+    hostNote.textContent =
+      `applies to ${names.length} host(s) from the evidence: ${shown}${more}`;
+  }
+  evSelect.addEventListener("change", syncHostNote);
+  syncHostNote();
 
   function sync() {
     const manual = method.value === "manual";
@@ -716,7 +728,7 @@ function actionForm({ parentFindingId, existing, done, close }) {
     field("How was this done?", method),
     toolField,
     field("Evidence used", evSelect),
-    field("Host(s) examined", picker.el, true),
+    el("div", { class: "field wide" }, hostNote),
     commandField,
     procedureField,
     field("Why you did it / notes", el("textarea", { name: "notes" },
@@ -736,7 +748,6 @@ function actionForm({ parentFindingId, existing, done, close }) {
         tool: data.get("tool").trim(),
         notes: data.get("notes").trim(),
         evidence_id: data.get("evidence_id") ? Number(data.get("evidence_id")) : null,
-        host_ids: picker.ids(),
       };
       if (m === "manual") {
         payload.procedure = data.get("procedure").trim();

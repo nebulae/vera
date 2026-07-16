@@ -101,9 +101,11 @@ retyping a name.
   all three), and a star for key findings.
 - **Host** (`H#`) — a system in the investigation, held in a **registry** with
   aliases (so `WS03`, `ws03`, and `WS03.corp` are one host). The registry is the
-  hub: evidence links to its **source host(s)**, an action to the **host(s) it
-  examined**, and a finding to the **host(s) it affects** — all by *selecting*
-  from the registry, never by retyping. A finding on 2+ hosts becomes a
+  hub: evidence links to its **source host(s)** (inherited from its collection),
+  a step's hosts **derive from the evidence it examines** (hosts belong to
+  evidence and collections, not individual steps), and a finding links to the
+  **host(s) it affects** (inherited from its step, adjustable) — all by
+  reference to the registry, never by retyping. A finding on 2+ hosts becomes a
   **cross-host finding** with a *stack count* — the same indicator on 30 hosts
   is one finding, not 30; `vera stack` lists them rarest-first for
   least-frequency-of-occurrence triage. Host links are optional (host-agnostic

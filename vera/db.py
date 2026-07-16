@@ -8,7 +8,7 @@ import json
 import os
 import sqlite3
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 OUTPUT_CAP = 256 * 1024        # chars of captured command output stored per action
 ATTACHMENT_CAP = 25 * 1024 * 1024  # max bytes per stored attachment
 
@@ -19,6 +19,9 @@ OS_KEYWORDS = ("windows", "server", "ubuntu", "linux", "macos", "mac", "rhel",
 
 # Hash algorithms a finding can carry, with their expected hex-digest length.
 HASH_SPECS = {"md5": 32, "sha1": 40, "sha256": 64}
+
+# Host disposition. '' = not yet triaged; the Comp. Hosts view derives from this.
+HOST_STATUSES = ("", "clean", "suspicious", "compromised")
 
 # vera never purges rows. "Deleting" sets deleted_at; queries filter it out.
 
@@ -36,6 +39,7 @@ CREATE TABLE hosts (
     aliases     TEXT NOT NULL DEFAULT '[]',
     ip          TEXT NOT NULL DEFAULT '',
     os          TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT '',
     system_type TEXT NOT NULL DEFAULT '',
     criticality TEXT NOT NULL DEFAULT '',
     notes       TEXT NOT NULL DEFAULT '',
@@ -289,9 +293,17 @@ def _migrate_v8(conn: sqlite3.Connection) -> None:
                  "ON collection_hosts(host_id)")
 
 
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """v8 -> v9: host disposition (clean/suspicious/compromised)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(hosts)")}
+    if "status" not in cols:
+        conn.execute("ALTER TABLE hosts ADD COLUMN status TEXT NOT NULL "
+                     "DEFAULT ''")
+
+
 # Applied in ascending order to bring a case up to SCHEMA_VERSION.
 MIGRATIONS = {2: _migrate_v2, 3: _migrate_v3, 4: _migrate_v4, 5: _migrate_v5,
-              6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8}
+              6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8, 9: _migrate_v9}
 
 
 class CaseError(Exception):
@@ -672,31 +684,42 @@ class Case:
 
     # -- hosts --------------------------------------------------------------
 
+    @staticmethod
+    def _check_status(status: str) -> str:
+        status = (status or "").strip().lower()
+        if status in ("unknown", "none"):
+            status = ""
+        if status not in HOST_STATUSES:
+            known = ", ".join(s or "unknown" for s in HOST_STATUSES)
+            raise CaseError(f"bad host status {status!r} (one of: {known})")
+        return status
+
     def add_host(self, name: str, aliases: list[str] | None = None, ip: str = "",
                  system_type: str = "", criticality: str = "",
-                 notes: str = "", os: str = "") -> int:
+                 notes: str = "", os: str = "", status: str = "") -> int:
         """Register a host; reuse an existing row if the name/alias collides."""
         name = name.strip()
         if not name:
             raise CaseError("host name must not be empty")
         if not os and notes:
             os = os_from_notes(notes)  # convenience: derive OS from notes prefix
+        status = self._check_status(status)
         existing = self._find_host(name)
         if existing is not None:
             # merge any new aliases / fill blank fields on the existing host
             self._merge_host(existing, aliases, ip, system_type, criticality,
-                             notes, os)
+                             notes, os, status)
             return existing
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO hosts(name, aliases, ip, os, system_type, criticality,"
-                " notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (name, json.dumps(aliases or []), ip, os, system_type, criticality,
-                 notes, _now()))
+                "INSERT INTO hosts(name, aliases, ip, os, status, system_type,"
+                " criticality, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, json.dumps(aliases or []), ip, os, status, system_type,
+                 criticality, notes, _now()))
         return cur.lastrowid
 
     def _merge_host(self, host_id: int, aliases, ip, system_type,
-                    criticality, notes, os="") -> None:
+                    criticality, notes, os="", status="") -> None:
         row = self.conn.execute("SELECT * FROM hosts WHERE id = ?",
                                 (host_id,)).fetchone()
         try:
@@ -710,7 +733,8 @@ class Case:
                 merged.append(a)
                 lowered.add(a.lower())
         fields = {"aliases": json.dumps(merged)}
-        for key, val in (("ip", ip), ("os", os), ("system_type", system_type),
+        for key, val in (("ip", ip), ("os", os), ("status", status),
+                         ("system_type", system_type),
                          ("criticality", criticality), ("notes", notes)):
             if val and not row[key]:
                 fields[key] = val
@@ -788,7 +812,7 @@ class Case:
             self.conn.execute("UPDATE hosts SET deleted_at = ? WHERE id = ?",
                               (_now(), host_id))
 
-    HOST_EDITABLE = {"name", "aliases", "ip", "os", "system_type",
+    HOST_EDITABLE = {"name", "aliases", "ip", "os", "status", "system_type",
                      "criticality", "notes"}
 
     def update_host(self, host_id: int, **fields) -> None:
@@ -798,6 +822,8 @@ class Case:
             raise CaseError(f"cannot edit host field(s): {', '.join(sorted(bad))}")
         if isinstance(fields.get("aliases"), list):
             fields["aliases"] = json.dumps(fields["aliases"])
+        if "status" in fields:
+            fields["status"] = self._check_status(fields["status"])
         if "name" in fields:
             name = fields["name"].strip()
             if not name:
@@ -838,6 +864,47 @@ class Case:
             "JOIN action_hosts ah ON ah.action_id = a.id "
             "WHERE ah.host_id = ? ORDER BY a.id", (host_id,))]
 
+    def coverage(self) -> dict:
+        """Per-host analysis rollup: what has (and hasn't) been examined.
+
+        Answers "did we look at everything?" — hosts with zero actions are the
+        gaps. Tools come from the actions actually logged, so the matrix grows
+        with the investigation.
+        """
+        def _counts(table: str) -> dict[int, int]:
+            owner = self._HOST_LINK[table]
+            return {r["host_id"]: r["n"] for r in self.conn.execute(
+                f"SELECT host_id, COUNT(DISTINCT {owner}) AS n FROM {table} "
+                "GROUP BY host_id")}
+
+        ev_n, act_n = _counts("evidence_hosts"), _counts("action_hosts")
+        find_n = self.host_finding_counts()
+        last = {r["host_id"]: r["last"] for r in self.conn.execute(
+            "SELECT ah.host_id, MAX(a.performed_at) AS last FROM action_hosts ah "
+            "JOIN actions a ON a.id = ah.action_id GROUP BY ah.host_id")}
+        per_tool: dict[int, dict[str, int]] = {}
+        tools: list[str] = []
+        for r in self.conn.execute(
+                "SELECT ah.host_id, COALESCE(NULLIF(a.tool, ''), '(other)') AS tool,"
+                " COUNT(*) AS n FROM action_hosts ah "
+                "JOIN actions a ON a.id = ah.action_id "
+                "GROUP BY ah.host_id, tool ORDER BY tool"):
+            per_tool.setdefault(r["host_id"], {})[r["tool"]] = r["n"]
+            if r["tool"] not in tools:
+                tools.append(r["tool"])
+        hosts = []
+        for h in self.hosts():
+            hosts.append({
+                "id": h["id"], "name": h["name"], "ip": h["ip"], "os": h["os"],
+                "status": h["status"], "system_type": h["system_type"],
+                "evidence": ev_n.get(h["id"], 0),
+                "actions": act_n.get(h["id"], 0),
+                "findings": find_n.get(h["id"], 0),
+                "last_examined": last.get(h["id"], ""),
+                "tools": per_tool.get(h["id"], {}),
+            })
+        return {"tools": tools, "hosts": hosts}
+
     # -- collections --------------------------------------------------------
 
     def add_collection(self, name: str, tool: str = "", operator: str = "",
@@ -873,6 +940,34 @@ class Case:
         return [r["host_id"] for r in self.conn.execute(
             "SELECT host_id FROM collection_hosts WHERE collection_id = ? "
             "ORDER BY host_id", (collection_id,))]
+
+    def expand_collection(self, collection_id: int, kind: str = "") -> list[dict]:
+        """One evidence item per collection host (Lab-2 style per-host artifacts).
+
+        Idempotent: hosts that already have evidence in this collection are
+        skipped, so re-running after adding hosts only fills the gaps.
+        Returns the created items as [{'id', 'host'}].
+        """
+        self._require("collections", collection_id, "C")
+        name = self.conn.execute("SELECT name FROM collections WHERE id = ?",
+                                 (collection_id,)).fetchone()["name"]
+        covered = {r["host_id"] for r in self.conn.execute(
+            "SELECT DISTINCT eh.host_id FROM evidence_hosts eh "
+            "JOIN evidence e ON e.id = eh.evidence_id "
+            "WHERE e.collection_id = ?", (collection_id,))}
+        created = []
+        for r in self.conn.execute(
+                "SELECT h.id, h.name FROM collection_hosts ch "
+                "JOIN hosts h ON h.id = ch.host_id AND h.deleted_at = '' "
+                "WHERE ch.collection_id = ? ORDER BY h.name COLLATE NOCASE",
+                (collection_id,)):
+            if r["id"] in covered:
+                continue
+            eid = self.add_evidence(f"{name} — {r['name']}", kind=kind,
+                                    collection_id=collection_id,
+                                    host_ids=[r["id"]])
+            created.append({"id": eid, "host": r["name"]})
+        return created
 
     def resolve_collection(self, ref: str) -> int:
         token = ref[1:] if ref[:1].upper() == "C" and ref[1:].isdigit() else ref

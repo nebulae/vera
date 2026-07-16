@@ -5,7 +5,13 @@ const state = {
   info: null,       // /api/case payload: meta, evidence, counts, types
   tab: "investigation",
   jumpTo: null,     // node id to scroll to after switching to investigation
+  notice: null,     // one-shot message shown on the next render
 };
+
+// host disposition — '' means not yet triaged
+const STATUS_OPTS = [["", "—"], ["clean", "clean"],
+  ["suspicious", "suspicious"], ["compromised", "compromised"]];
+const statusClass = (s) => (s ? " st-" + s : "");
 
 /* ---------- tiny DOM helpers ---------- */
 
@@ -128,6 +134,7 @@ function tabList() {
     { id: "timeline", label: "Timeline" },
     { id: "stack", label: "Stack" },
     { id: "hosts", label: "Hosts" },
+    { id: "coverage", label: "Coverage" },
   ];
   for (const t of state.info.types) {
     if (t.view) tabs.push({ id: `type:${t.key}`, label: t.view });
@@ -169,6 +176,7 @@ async function render() {
     else if (state.tab === "timeline") await renderTimeline(view);
     else if (state.tab === "stack") await renderStack(view);
     else if (state.tab === "hosts") await renderHosts(view);
+    else if (state.tab === "coverage") await renderCoverage(view);
     else if (state.tab === "evidence") await renderEvidence(view);
     else if (state.tab.startsWith("type:")) {
       await renderCategory(view, state.tab.slice(5));
@@ -473,13 +481,15 @@ function hostPicker(initial, hint) {
     // system_type doubles as the network/CIDR label; os is a first-class field
     const segChips = groupChips((h) => h.system_type, "in segment");
     const osChips = groupChips((h) => h.os, "with OS");
+    const statChips = groupChips((h) => h.status, "with disposition");
     const rowOf = (label, chipList) => chipList.length
       ? el("div", { class: "host-quick-row segs" },
           el("span", { class: "quick-label" }, label), ...chipList) : null;
     quickBar.replaceChildren(
       el("div", { class: "host-quick-row" }, ...controls),
       rowOf("OS", osChips),
-      rowOf("Segment", segChips));
+      rowOf("Segment", segChips),
+      rowOf("Status", statChips));
   }
 
   function renderList() {
@@ -979,6 +989,7 @@ async function renderHosts(view) {
     { key: "name", ph: "host name", cls: "" },
     { key: "ip", ph: "IP", cls: "mono" },
     { key: "os", ph: "Windows 11 / Ubuntu 22.04 …", cls: "" },
+    { key: "status", select: true },
     { key: "system_type", ph: "segment / type", cls: "" },
     { key: "aliases", ph: "comma-separated", cls: "" },
     { key: "notes", ph: "notes", cls: "" },
@@ -989,11 +1000,15 @@ async function renderHosts(view) {
     el("thead", {}, el("tr", {},
       el("th", {}, "Ref"),
       ...cols.map((c) => el("th", {},
-        { system_type: "Segment / Type", os: "OS" }[c.key]
+        { system_type: "Segment / Type", os: "OS", status: "Status" }[c.key]
         || c.key[0].toUpperCase() + c.key.slice(1))),
       el("th", {}, "Findings"),
       el("th", {}, ""))),
     tbody);
+
+  const statusSelect = (value) => el("select", { class: "cell cell-select" },
+    STATUS_OPTS.map(([v, label]) =>
+      el("option", { value: v, selected: (value || "") === v ? "" : null }, label)));
 
   const cellVal = (h, key) => key === "aliases" ? (h.aliases || []).join(", ")
     : (h[key] || "");
@@ -1001,15 +1016,16 @@ async function renderHosts(view) {
     ? raw.split(",").map((s) => s.trim()).filter(Boolean) : raw.trim();
 
   function liveRow(h) {
-    const tr = el("tr", { class: "host-row" });
+    const tr = el("tr", { class: "host-row" + statusClass(h.status) });
     const inputs = {};
     tr.append(el("td", { class: "mono host-ref" }, `H${h.id}`));
     for (const c of cols) {
-      const inp = el("input", { class: "cell " + c.cls, value: cellVal(h, c.key),
-        placeholder: c.ph, autocomplete: "off" });
+      const inp = c.select ? statusSelect(h[c.key])
+        : el("input", { class: "cell " + c.cls, value: cellVal(h, c.key),
+            placeholder: c.ph, autocomplete: "off" });
       inputs[c.key] = inp;
       inp.addEventListener("change", async () => {
-        const val = parseVal(c.key, inp.value);
+        const val = c.select ? inp.value : parseVal(c.key, inp.value);
         if (c.key === "name" && !String(val).trim()) {
           inp.value = h.name; return;  // don't allow blanking the name
         }
@@ -1017,6 +1033,7 @@ async function renderHosts(view) {
         try {
           await api(`/api/hosts/${h.id}`, { method: "PATCH", body: { [c.key]: val } });
           h[c.key] = val;
+          if (c.key === "status") tr.className = "host-row" + statusClass(val);
           flashSaved(inp);
         } catch (e) { err.textContent = String(e.message || e); inp.value = cellVal(h, c.key); }
       });
@@ -1052,6 +1069,8 @@ async function renderHosts(view) {
       try {
         const body = names.length > 1 ? { names }
           : { name: names[0], ip: parseVal("ip", inputs.ip.value),
+              os: inputs.os.value.trim(),
+              status: inputs.status.value,
               system_type: inputs.system_type.value.trim(),
               aliases: parseVal("aliases", inputs.aliases.value),
               notes: inputs.notes.value.trim() };
@@ -1066,8 +1085,9 @@ async function renderHosts(view) {
       } catch (e) { err.textContent = String(e.message || e); committing = false; }
     };
     for (const c of cols) {
-      const inp = el("input", { class: "cell " + c.cls,
-        placeholder: c.key === "name" ? "add a host…" : c.ph, autocomplete: "off" });
+      const inp = c.select ? statusSelect("")
+        : el("input", { class: "cell " + c.cls,
+            placeholder: c.key === "name" ? "add a host…" : c.ph, autocomplete: "off" });
       inputs[c.key] = inp;
       if (c.key === "name") inp.addEventListener("change", commit);
       tr.append(el("td", {}, inp));
@@ -1133,6 +1153,59 @@ function openHostPanel(h, detail) {
     section("Findings", findRows),
     el("button", { class: "btn small", onclick: () => overlay.remove() }, "Close")));
   document.body.append(overlay);
+}
+
+/* ---------- coverage (hosts × analysis — "did we look at everything?") ---------- */
+
+function statusPill(s) {
+  return s ? el("span", { class: "st-pill st-" + s }, s)
+           : el("span", { class: "meta" }, "—");
+}
+
+async function renderCoverage(view) {
+  const cov = await api("/api/coverage");
+  if (!cov.hosts.length) {
+    emptyState(view, "No hosts registered",
+      "Coverage shows what analysis has touched each host — register hosts first.");
+    return;
+  }
+  const gaps = cov.hosts.filter((h) => !h.actions);
+  const nOf = (s) => cov.hosts.filter((h) => (h.status || "") === s).length;
+  const bits = [];
+  for (const [key] of STATUS_OPTS) {
+    const n = nOf(key);
+    if (key && n) bits.push(`${n} ${key}`);
+  }
+  if (nOf("")) bits.push(`${nOf("")} not triaged`);
+
+  view.replaceChildren(
+    el("p", { class: "hint" },
+      "Every registered host × the analysis logged against it (derived from each " +
+      "step's host links). Amber rows have no analysis at all — the gaps in your sweep."),
+    el("div", { class: "cov-summary" },
+      el("span", { class: gaps.length ? "cov-warn" : "cov-ok" },
+        gaps.length
+          ? `⚠ ${gaps.length} of ${cov.hosts.length} hosts have no analysis logged`
+          : `✓ all ${cov.hosts.length} hosts have at least one analysis step`),
+      bits.length ? el("span", { class: "meta" }, "  ·  " + bits.join(" · ")) : null));
+
+  const headers = ["Ref", "Host", "Status", "Evidence", "Steps", "Findings",
+    "Last examined", ...cov.tools];
+  const table = el("table", { class: "cov-table" },
+    el("thead", {}, el("tr", {}, headers.map((h) => el("th", {}, h)))),
+    el("tbody", {}, cov.hosts.map((h) => el("tr", {
+      class: (h.actions ? "" : "cov-gap") + statusClass(h.status) },
+      el("td", { class: "mono" }, `H${h.id}`),
+      el("td", {}, el("b", {}, h.name),
+        h.ip ? el("span", { class: "meta mono" }, ` ${h.ip}`) : null),
+      el("td", {}, statusPill(h.status)),
+      el("td", { class: "mono cov-n" }, h.evidence ? String(h.evidence) : "·"),
+      el("td", { class: "mono cov-n" }, h.actions ? String(h.actions) : "—"),
+      el("td", { class: "mono cov-n" }, h.findings ? String(h.findings) : "·"),
+      el("td", { class: "mono meta" }, h.last_examined || "never"),
+      cov.tools.map((t) => el("td", { class: "mono cov-n" },
+        h.tools[t] ? String(h.tools[t]) : "·"))))));
+  view.append(el("div", { class: "table-wrap" }, table));
 }
 
 /* ---------- timeline ---------- */
@@ -1306,7 +1379,30 @@ async function renderEvidence(view) {
     });
   }));
   view.append(colBar);
+  if (state.notice) {
+    view.append(el("div", { class: "notice" }, state.notice));
+    state.notice = null;
+  }
   if (collections.length) {
+    const expandBtn = (c) => el("button", { class: "btn small ghost",
+      title: "create one evidence item per host in this collection "
+        + "(hosts that already have evidence in it are skipped)",
+      onclick: async () => {
+        if (!confirm(`Create one evidence item per host (${c.hosts.length}) in `
+          + `“${c.name}”?\nHosts that already have evidence in this collection `
+          + "are skipped, so this is safe to re-run.")) return;
+        try {
+          const res = await api(`/api/collections/${c.id}/expand`,
+            { method: "POST", body: {} });
+          state.notice = res.count
+            ? `C${c.id}: created ${res.count} per-host evidence item(s)`
+            : `C${c.id}: nothing to create — every host already has evidence here`;
+          await reload();
+        } catch (e) {
+          state.notice = `expand failed: ${e.message || e}`;
+          render();
+        }
+      } }, "Expand per host");
     view.append(el("div", { class: "table-wrap", style: "margin-bottom:16px" },
       el("table", {},
         el("thead", {}, el("tr", {},
@@ -1318,8 +1414,10 @@ async function renderEvidence(view) {
           el("td", {}, (c.hosts || []).length
             ? el("span", { class: "host-count-chip" }, `🖥 ${c.hosts.length}`) : ""),
           el("td", {}, c.scope),
-          el("td", {}, el("button", { class: "btn small ghost",
-            onclick: () => openCollectionEditor(c) }, "Edit"))))))));
+          el("td", {},
+            el("button", { class: "btn small ghost",
+              onclick: () => openCollectionEditor(c) }, "Edit"),
+            (c.hosts || []).length ? expandBtn(c) : null)))))));
   }
 
   const colField = () => {

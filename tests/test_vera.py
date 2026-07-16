@@ -920,3 +920,147 @@ def test_api_hosts_collections_stack(running_server):
     # host detail rolls up evidence + actions
     detail = json.loads(_req(port, "GET", f"/api/host_detail?id={hid}")[1])
     assert detail["actions"] and detail["evidence"]
+
+
+# ---- v0.9: disposition, coverage, per-host expansion ---------------------
+
+def test_host_status(case):
+    h1 = case.add_host("RD01", status="compromised")
+    h2 = case.add_host("RD02")
+    hosts = {h["id"]: h for h in case.hosts()}
+    assert hosts[h1]["status"] == "compromised"
+    assert hosts[h2]["status"] == ""
+    case.update_host(h2, status="Suspicious")     # normalized to lowercase
+    assert next(h for h in case.hosts() if h["id"] == h2)["status"] == "suspicious"
+    case.update_host(h2, status="unknown")        # synonym for '' (not triaged)
+    assert next(h for h in case.hosts() if h["id"] == h2)["status"] == ""
+    with pytest.raises(CaseError):
+        case.update_host(h1, status="pwned")
+    with pytest.raises(CaseError):
+        case.add_host("RD03", status="bad-value")
+
+
+def test_migration_v8_to_v9_adds_status(tmp_path):
+    p = str(tmp_path / "v8.vera")
+    c = Case(p, create=True)
+    c.add_host("WS01")
+    c.conn.execute("UPDATE case_meta SET value='8' WHERE key='schema_version'")
+    c.conn.commit()
+    c.close()
+    with Case(p) as c2:
+        assert c2.meta()["schema_version"] == str(db.SCHEMA_VERSION)
+        assert next(h for h in c2.hosts() if h["name"] == "WS01")["status"] == ""
+        c2.update_host(c2.resolve_host("WS01"), status="compromised")
+
+
+def test_status_in_exports(case, tmp_path):
+    case.add_host("RD01", ip="10.0.0.1", os="Windows 11", status="compromised")
+    case.add_host("RD02", status="suspicious")
+    case.add_host("RD03")
+    out = str(tmp_path / "out")
+    written = export.export(case, "csv", out)
+    hosts_csv = next(p for p in written if p.endswith("_Hosts.csv"))
+    text = open(hosts_csv).read()
+    assert "Status" in text and "compromised" in text
+    comp_csv = next(p for p in written if p.endswith("_CompromisedHosts.csv"))
+    comp = open(comp_csv).read()
+    assert "RD01" in comp and "RD02" not in comp
+    md = export.render_md(case)
+    assert "Compromised hosts" in md
+    assert "**Confirmed compromised:** `RD01`" in md
+    assert "**Suspicious:** `RD02`" in md
+    assert "1 of 3 hosts not yet triaged: RD03" in md
+
+
+def test_expand_collection(case):
+    h1 = case.add_host("RD01")
+    h2 = case.add_host("RD02")
+    h3 = case.add_host("RD03")
+    cid = case.add_collection("Lab2 export", host_ids=[h1, h2, h3])
+    # RD02 is already covered by hand-registered evidence in this collection
+    case.add_evidence("RD02 amcache", collection_id=cid, host_ids=[h2])
+    created = case.expand_collection(cid, kind="triage")
+    assert [it["host"] for it in created] == ["RD01", "RD03"]
+    ev = {e["label"]: e for e in case.evidence()}
+    assert "Lab2 export — RD01" in ev and "Lab2 export — RD03" in ev
+    item = ev["Lab2 export — RD01"]
+    assert item["kind"] == "triage"
+    assert item["collection_id"] == cid
+    assert [h["name"] for h in item["hosts"]] == ["RD01"]
+    # idempotent: nothing left to create
+    assert case.expand_collection(cid) == []
+
+
+def test_coverage(case):
+    h1 = case.add_host("RD01", status="compromised")
+    h2 = case.add_host("RD02")
+    e1 = case.add_evidence("RD01 triage", host_ids=[h1])
+    a1 = case.add_action("amcache.py rd01", tool="amcache.py",
+                         evidence_id=e1, host_ids=[h1])
+    case.add_action(method="manual", tool="Timeline Explorer",
+                    procedure="filtered on .exe", host_ids=[h1])
+    case.add_finding("evil.exe in amcache", action_id=a1, host_ids=[h1])
+    cov = case.coverage()
+    assert set(cov["tools"]) == {"amcache.py", "Timeline Explorer"}
+    by_name = {h["name"]: h for h in cov["hosts"]}
+    rd01 = by_name["RD01"]
+    assert (rd01["evidence"], rd01["actions"], rd01["findings"]) == (1, 2, 1)
+    assert rd01["status"] == "compromised"
+    assert rd01["tools"] == {"amcache.py": 1, "Timeline Explorer": 1}
+    assert rd01["last_examined"]
+    rd02 = by_name["RD02"]
+    assert (rd02["evidence"], rd02["actions"], rd02["findings"]) == (0, 0, 0)
+    assert rd02["last_examined"] == ""
+    # soft-deleted hosts drop out of coverage entirely
+    case.soft_delete_host(h2)
+    assert [h["name"] for h in case.coverage()["hosts"]] == ["RD01"]
+
+
+def test_cli_status_expand_coverage(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VERA_CASE", str(tmp_path / "cli9.vera"))
+    assert main(["init", str(tmp_path / "cli9.vera"), "--name", "t"]) == 0
+    monkeypatch.setattr("vera.cli.ACTIVE_FILE", str(tmp_path / "active"))
+    assert main(["host", "add", "RD01", "RD02", "--status", "unknown"]) == 0
+    assert main(["host", "edit", "RD01", "--status", "compromised"]) == 0
+    capsys.readouterr()
+    assert main(["host", "list"]) == 0
+    assert "COMPROMISED" in capsys.readouterr().out
+    assert main(["collection", "add", "Lab2", "--hosts", "RD01,RD02"]) == 0
+    capsys.readouterr()
+    assert main(["collection", "expand", "C1", "--kind", "triage"]) == 0
+    out = capsys.readouterr().out
+    assert "2 evidence item(s) created" in out
+    assert main(["run", "amcache.py rd01", "--evidence", "Lab2 — RD01"]) == 0
+    capsys.readouterr()
+    assert main(["coverage"]) == 0
+    out = capsys.readouterr().out
+    assert "RD01" in out and "never" in out
+    assert "1 of 2 host(s) have no analysis logged yet" in out
+
+
+def test_api_coverage_and_expand(running_server):
+    port = running_server
+    status, raw = _req(port, "POST", "/api/hosts",
+                       {"names": ["RD01", "RD02"], "status": "suspicious"})
+    assert status == 201
+    ids = json.loads(raw)["ids"]
+    status, raw = _req(port, "POST", "/api/collections",
+                       {"name": "Lab2 export", "host_ids": ids})
+    assert status == 201
+    cid = json.loads(raw)["id"]
+    status, raw = _req(port, "POST", f"/api/collections/{cid}/expand",
+                       {"kind": "triage"})
+    assert status == 201
+    data = json.loads(raw)
+    assert data["count"] == 2
+    assert {it["host"] for it in data["created"]} == {"RD01", "RD02"}
+    # re-running creates nothing (idempotent)
+    status, raw = _req(port, "POST", f"/api/collections/{cid}/expand", {})
+    assert json.loads(raw)["count"] == 0
+
+    status, raw = _req(port, "GET", "/api/coverage")
+    assert status == 200
+    cov = json.loads(raw)
+    rd01 = next(h for h in cov["hosts"] if h["name"] == "RD01")
+    assert rd01["evidence"] == 1 and rd01["actions"] == 0
+    assert rd01["status"] == "suspicious"

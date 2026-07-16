@@ -624,3 +624,50 @@ td.stack-n { font-weight: 700; color: var(--finding); }
   border-radius: 6px;
 }
 .row-del:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+
+/* host disposition (status) */
+.host-grid .cell-select {
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+tr.st-compromised td { background: color-mix(in srgb, #dc2626 9%, transparent); }
+tr.st-suspicious td { background: color-mix(in srgb, #d97706 9%, transparent); }
+tr.st-clean td { background: color-mix(in srgb, #16a34a 6%, transparent); }
+.st-pill {
+  display: inline-block;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.st-pill.st-compromised { background: color-mix(in srgb, #dc2626 16%, transparent); color: #dc2626; }
+.st-pill.st-suspicious { background: color-mix(in srgb, #d97706 16%, transparent); color: #b45309; }
+.st-pill.st-clean { background: color-mix(in srgb, #16a34a 16%, transparent); color: #15803d; }
+@media (prefers-color-scheme: dark) {
+  .st-pill.st-compromised { color: #f87171; }
+  .st-pill.st-suspicious { color: #fbbf24; }
+  .st-pill.st-clean { color: #4ade80; }
+}
+
+/* coverage matrix */
+.cov-summary { margin: 2px 0 14px; font-weight: 600; font-size: 14px; }
+.cov-warn { color: #b45309; }
+.cov-ok { color: #15803d; }
+@media (prefers-color-scheme: dark) {
+  .cov-warn { color: #fbbf24; }
+  .cov-ok { color: #4ade80; }
+}
+.cov-table td { white-space: nowrap; }
+.cov-n { text-align: center; color: var(--muted); }
+tr.cov-gap td { background: color-mix(in srgb, #d97706 10%, transparent); }
+
+/* one-shot notice (e.g. after expanding a collection) */
+.notice {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, #16a34a 40%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, #16a34a 8%, transparent);
+  font-size: 13px;
+}

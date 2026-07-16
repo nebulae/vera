@@ -74,10 +74,17 @@ def _export_csv(case: Case, out_dir: str, stem: str) -> list[str]:
 
     hosts = case.hosts()
     if hosts:
-        sheet("Hosts", ("Host", "IP", "System Type", "Criticality",
-                        "Aliases", "Findings"),
-              [[h["name"], h["ip"], h["system_type"], h["criticality"],
-                ", ".join(h["aliases"]), h["finding_count"]] for h in hosts])
+        sheet("Hosts", ("Host", "IP", "OS", "Status", "System Type",
+                        "Criticality", "Aliases", "Findings"),
+              [[h["name"], h["ip"], h["os"], h["status"], h["system_type"],
+                h["criticality"], ", ".join(h["aliases"]), h["finding_count"]]
+               for h in hosts])
+
+    compromised = [h for h in hosts if h["status"] == "compromised"]
+    if compromised:
+        sheet("CompromisedHosts", ("Host", "IP", "OS", "System Type", "Findings"),
+              [[h["name"], h["ip"], h["os"], h["system_type"],
+                h["finding_count"]] for h in compromised])
 
     stack = case.stack_findings()
     if stack:
@@ -183,13 +190,32 @@ def render_md(case: Case, linker=None) -> str:
     if hosts:
         w("## Hosts")
         w("")
-        w("| # | Host | IP | Type | Aliases | Findings |")
-        w("|---|------|----|------|---------|----------|")
+        w("| # | Host | IP | OS | Status | Type | Aliases | Findings |")
+        w("|---|------|----|----|--------|------|---------|----------|")
         for h in hosts:
             w(f"| H{h['id']} | {_mdcell(h['name'])} | {_mdcell(h['ip'])} "
+              f"| {_mdcell(h['os'])} | {_mdcell(h['status'])} "
               f"| {_mdcell(h['system_type'])} | {_mdcell(', '.join(h['aliases']))} "
               f"| {h['finding_count']} |")
         w("")
+        compromised = [h for h in hosts if h["status"] == "compromised"]
+        suspicious = [h for h in hosts if h["status"] == "suspicious"]
+        if compromised or suspicious:
+            w("### Compromised hosts")
+            w("")
+            if compromised:
+                w("**Confirmed compromised:** "
+                  + ", ".join(f"`{h['name']}`" for h in compromised))
+                w("")
+            if suspicious:
+                w("**Suspicious:** "
+                  + ", ".join(f"`{h['name']}`" for h in suspicious))
+                w("")
+        untriaged = [h for h in hosts if not h["status"]]
+        if untriaged and len(untriaged) < len(hosts):
+            w(f"_{len(untriaged)} of {len(hosts)} hosts not yet triaged: "
+              + ", ".join(h["name"] for h in untriaged) + "._")
+            w("")
 
     evidence = case.evidence()
     w("## Evidence")

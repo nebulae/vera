@@ -176,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(case.hosts())
             elif url.path == "/api/collections":
                 self._json(case.collections())
+            elif url.path == "/api/coverage":
+                self._json(case.coverage())
             elif url.path == "/api/stack":
                 self._json(case.stack_findings())
             elif url.path == "/api/host_findings":
@@ -254,6 +256,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"id": eid}, 201)
             elif method == "POST" and url.path == "/api/hosts":
                 self._add_hosts(case, body)
+            elif method == "POST" and re.fullmatch(
+                    r"/api/collections/(\d+)/expand", url.path):
+                cid = int(url.path.split("/")[3])
+                created = case.expand_collection(cid, kind=body.get("kind", ""))
+                self._json({"created": created, "count": len(created)}, 201)
             elif method == "POST" and url.path == "/api/collections":
                 cid = case.add_collection(
                     body.get("name", ""), tool=body.get("tool", ""),
@@ -347,7 +354,8 @@ class Handler(BaseHTTPRequestHandler):
             raise CaseError("provide a host name or a 'names' list")
         ids = [case.add_host(
             n, aliases=body.get("aliases") or [], ip=body.get("ip", ""),
-            os=body.get("os", ""), system_type=body.get("system_type", ""),
+            os=body.get("os", ""), status=body.get("status", ""),
+            system_type=body.get("system_type", ""),
             criticality=body.get("criticality", ""), notes=body.get("notes", ""))
             for n in names if n and n.strip()]
         self._json({"ids": ids, "count": len(ids)}, 201)

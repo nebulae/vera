@@ -53,15 +53,18 @@ the hosts once, group evidence into a collection, and stack a single finding
 across every host it touches:
 
 ```sh
-vera collection add "Lab2 amcache+shimcache" --tool AmcacheParser --scope "40 hosts"
 vera host add --from hosts.txt --type workstation      # register 40 hosts at once
 vera host add DC01 --type "domain controller" --ip 10.0.0.10
+vera collection add "Lab2 amcache+shimcache" --tool AmcacheParser --hosts "WS01,WS02,…"
+vera collection expand C1 --kind triage   # one evidence item per collection host
 
 vera manual "Parsed all 40 exports in Timeline Explorer" --tool AmcacheParser --collection C1
 # one finding, stacked across the hosts that show the indicator
 vera f "svchost.exe anomalous path C:\temp" -t malware --hosts "WS03,WS07,WS11,WS22"
 
 vera stack          # cross-host findings, rarest first (least-frequency triage)
+vera coverage       # per-host rollup — which hosts has nobody examined yet?
+vera host edit WS03 --status compromised  # disposition: clean/suspicious/compromised
 vera host show WS03 # everything affecting one host
 ```
 
@@ -104,9 +107,18 @@ retyping a name.
   **cross-host finding** with a *stack count* — the same indicator on 30 hosts
   is one finding, not 30; `vera stack` lists them rarest-first for
   least-frequency-of-occurrence triage. Host links are optional (host-agnostic
-  work needs none).
+  work needs none). Each host also carries a **disposition** (`unknown` /
+  `clean` / `suspicious` / `compromised`) — set it as triage progresses and the
+  compromised-hosts view derives itself instead of being maintained by hand.
 - **Collection** (`C#`) — a batch/sweep (e.g. a 40-host artifact export) with
-  its provenance (tool, operator, scope). Evidence and actions can belong to one.
+  its provenance (tool, operator, scope) and the **hosts it covers**. Evidence
+  added to a collection inherits those hosts; `vera collection expand C1`
+  creates one evidence item per covered host in a single step, skipping hosts
+  that already have evidence in it.
+- **Coverage** — `vera coverage` (and the web Coverage tab) rolls up, per host,
+  the evidence, steps, and findings that reference it, plus which tools were
+  used and when it was last examined. Hosts with no analysis logged are called
+  out — the answer to "did we look at everything?".
 - **Drill-down** — `vera run ... --from F3` links a new action to the finding
   that prompted it. That chain *is* the investigation.
 
@@ -135,7 +147,11 @@ original run.
 - **Hosts** — an **inline-editable** registry grid: click any cell, tab between
   fields, changes autosave as you go. The blank row at the bottom adds a host
   (paste a newline/comma list to add many at once); ✕ removes one. Per-host
-  finding counts click through to what affects each host.
+  finding counts click through to what affects each host. The Status column
+  color-codes each row by disposition.
+- **Coverage** — the hosts × analysis matrix: evidence/step/finding counts,
+  per-tool step counts, and last-examined time for every host, with unexamined
+  hosts highlighted.
 - **Category tabs** — Compromised Hosts / Accounts, Malware & Tools,
   Network / Host Indicators, generated automatically from finding types
 - **Evidence** — items and hashes, plus collections/batches
@@ -159,7 +175,8 @@ everything that was ever entered.
   findings, timeline, a cross-host-indicator appendix (rarest first), and the
   classic category appendices.
 - `vera export csv` — one CSV per classic IR-spreadsheet sheet (same column
-  headers), plus `Hosts.csv` and `CrossHostFindings.csv`.
+  headers), plus `Hosts.csv`, `CompromisedHosts.csv` (derived from host
+  disposition), and `CrossHostFindings.csv`.
 - `vera export json` — complete structured dump (hosts, collections, findings
   with their affected-host sets, and attachment manifest).
 

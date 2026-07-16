@@ -47,6 +47,10 @@ def c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _tty() else text
 
 
+# disposition -> ANSI color for terminal output
+_STATUS_COLOR = {"compromised": "1;31", "suspicious": "1;33", "clean": "32"}
+
+
 def aid(n: int) -> str:
     return c("1;36", f"A{n}")
 
@@ -184,6 +188,7 @@ def cmd_host(args) -> int:
             for name in names:
                 hid = case.add_host(name, aliases=args.alias or [],
                                     ip=args.ip or "", os=args.os or "",
+                                    status=args.status or "",
                                     system_type=args.type or "",
                                     criticality=args.crit or "", notes=args.note or "")
                 added.append((hid, name))
@@ -199,6 +204,8 @@ def cmd_host(args) -> int:
                 fields["ip"] = args.ip
             if args.os is not None:
                 fields["os"] = args.os
+            if args.status is not None:
+                fields["status"] = args.status
             if args.type is not None:
                 fields["system_type"] = args.type
             if args.crit is not None:
@@ -222,7 +229,7 @@ def cmd_host(args) -> int:
             print(f"H{h['id']}  {h['name']}")
             if h["aliases"]:
                 print(f"  aliases: {', '.join(h['aliases'])}")
-            for key, label in (("ip", "ip"), ("os", "os"),
+            for key, label in (("ip", "ip"), ("os", "os"), ("status", "status"),
                                ("system_type", "type"),
                                ("criticality", "criticality"), ("notes", "notes")):
                 if h[key]:
@@ -239,6 +246,9 @@ def cmd_host(args) -> int:
                 extra = f"  {h['ip']}" if h["ip"] else ""
                 extra += f"  {h['os']}" if h["os"] else ""
                 extra += f"  [{h['system_type']}]" if h["system_type"] else ""
+                if h["status"]:
+                    extra += "  " + c(_STATUS_COLOR.get(h["status"], "0"),
+                                      h["status"].upper())
                 print(f"H{h['id']:>3}  {h['name']:<20}{extra}  "
                       f"({h['finding_count']} findings)")
     return 0
@@ -271,6 +281,15 @@ def cmd_collection(args) -> int:
             if not fields and args.hosts is None:
                 raise CaseError("nothing to change — pass --name/--hosts/…")
             print(f"C{cid} updated")
+        elif args.collection_cmd == "expand":
+            cid = case.resolve_collection(args.ref)
+            created = case.expand_collection(cid, kind=args.kind or "")
+            for item in created:
+                print(f"E{item['id']}  {item['host']}")
+            col = next(x for x in case.collections() if x["id"] == cid)
+            skipped = len(col["hosts"]) - len(created)
+            note = f" ({skipped} host(s) already covered)" if skipped else ""
+            print(f"{len(created)} evidence item(s) created in C{cid}{note}")
         else:
             cols = case.collections()
             if not cols:
@@ -502,6 +521,34 @@ def cmd_finding(args) -> int:
         if hashes:
             print("   " + "  ".join(f"{a}:{v[:12]}…" for a, v in hashes.items()))
         _attach_files(case, "finding", f, args.shot, "exhibit")
+    return 0
+
+
+def cmd_coverage(args) -> int:
+    """Hosts × analysis rollup — the 'did we look at everything?' view."""
+    with open_case(args) as case:
+        cov = case.coverage()
+        if not cov["hosts"]:
+            print("no hosts registered")
+            return 0
+        gaps = [h for h in cov["hosts"] if h["actions"] == 0]
+        print(f"{'':>4} {'Host':<20} {'Status':<12} {'Ev':>3} {'Act':>4} "
+              f"{'Fnd':>4}  Last examined")
+        for h in cov["hosts"]:
+            status = h["status"] or "-"
+            line = (f"H{h['id']:>3} {h['name']:<20} "
+                    f"{c(_STATUS_COLOR.get(h['status'], '2'), f'{status:<12}')} "
+                    f"{h['evidence']:>3} {h['actions']:>4} {h['findings']:>4}  "
+                    f"{h['last_examined'] or c('2', 'never')}")
+            print(line)
+        if gaps:
+            names = ", ".join(h["name"] for h in gaps)
+            print(c("1;33", f"\n{len(gaps)} of {len(cov['hosts'])} host(s) have "
+                            f"no analysis logged yet:"))
+            print(f"  {names}")
+        else:
+            print(c("32", f"\nall {len(cov['hosts'])} hosts have at least one "
+                          f"analysis step logged"))
     return 0
 
 
@@ -823,6 +870,9 @@ def build_parser() -> argparse.ArgumentParser:
     ha.add_argument("--alias", action="append", help="alias (repeatable)")
     ha.add_argument("--ip")
     ha.add_argument("--os", help="operating system, e.g. 'Windows 11'")
+    ha.add_argument("--status", choices=("unknown", "clean", "suspicious",
+                                         "compromised"),
+                    help="disposition (default: unknown)")
     ha.add_argument("--type", help="workstation / DC / server ...")
     ha.add_argument("--crit", help="criticality tag")
     ha.add_argument("--note")
@@ -831,6 +881,9 @@ def build_parser() -> argparse.ArgumentParser:
     he.add_argument("--name", help="rename the host")
     he.add_argument("--ip")
     he.add_argument("--os", help="operating system, e.g. 'Windows 11'")
+    he.add_argument("--status", choices=("unknown", "clean", "suspicious",
+                                         "compromised"),
+                    help="disposition — drives the Compromised view")
     he.add_argument("--type", help="workstation / DC / server ...")
     he.add_argument("--crit", help="criticality tag")
     he.add_argument("--note", help="notes")
@@ -865,12 +918,20 @@ def build_parser() -> argparse.ArgumentParser:
     ce.add_argument("--note", help="notes")
     ce.add_argument("--hosts", action="append", metavar="LIST",
                     help="replace the collection's host set — registry refs")
+    cx = csub.add_parser("expand", help="create one evidence item per collection "
+                                        "host (skips hosts already covered)")
+    cx.add_argument("ref", help="C1")
+    cx.add_argument("--kind", help="kind for the created items, e.g. triage")
     csub.add_parser("list", help="list collections")
     p.set_defaults(func=cmd_collection)
 
     p = sub.add_parser("stack", help="cross-host findings, rarest first "
                                      "(least-frequency-of-occurrence triage)")
     p.set_defaults(func=cmd_stack)
+
+    p = sub.add_parser("coverage", help="per-host analysis rollup — spot hosts "
+                                        "nobody has examined yet")
+    p.set_defaults(func=cmd_coverage)
 
     p = sub.add_parser("run", help="log a command/tool you ran "
                                    "(pipe its output in to capture it)")

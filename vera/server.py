@@ -336,10 +336,22 @@ class Handler(BaseHTTPRequestHandler):
                 case.set_action_hosts(
                     row_id, case.evidence_host_ids(eid) if eid else [])
         else:  # evidence: fields and/or host links
+            row = case.conn.execute(
+                "SELECT collection_id FROM evidence WHERE id = ?",
+                (row_id,)).fetchone()
+            old_cid = row["collection_id"] if row else None
             if body:
                 case.update_evidence(row_id, **body)
             if has_hosts:
                 case.set_evidence_hosts(row_id, host_ids)
+            else:
+                # moving evidence INTO (or between) collections re-derives its
+                # hosts from the collection; an unchanged link leaves them alone
+                # so per-host expansion items keep their single host
+                new_cid = body.get("collection_id", old_cid)
+                if new_cid and new_cid != old_cid:
+                    case.set_evidence_hosts(
+                        row_id, case.collection_host_ids(new_cid))
 
     def _patch_collection(self, case: Case, cid: int, body: dict) -> None:
         body = dict(body)

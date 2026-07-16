@@ -427,6 +427,10 @@ class Case:
                      host_ids: list[int] | None = None) -> int:
         if collection_id is not None:
             self._require("collections", collection_id, "C")
+            # evidence in a collection sources its hosts from the collection
+            # (explicit host_ids — e.g. a per-host expansion item — still wins)
+            if not host_ids:
+                host_ids = self.collection_host_ids(collection_id)
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO evidence(label, kind, source, sha256, notes,"
@@ -1012,16 +1016,38 @@ class Case:
                              finding_id, host_ids, "F")
 
     def set_evidence_hosts(self, evidence_id: int, host_ids: list[int]) -> None:
+        old = set(self.evidence_host_ids(evidence_id))
         self._set_host_links("evidence_hosts", "evidence_id", "evidence",
                              evidence_id, host_ids, "E")
+        if old == set(host_ids):
+            return
+        # steps derive their hosts from the evidence they examine: any step
+        # still tracking the old set follows; a step with a different set
+        # (explicit override) is left alone
+        for r in self.conn.execute(
+                "SELECT id FROM actions WHERE evidence_id = ?", (evidence_id,)):
+            if set(self.action_host_ids(r["id"])) == old:
+                self._set_host_links("action_hosts", "action_id", "actions",
+                                     r["id"], host_ids, "A")
 
     def set_action_hosts(self, action_id: int, host_ids: list[int]) -> None:
         self._set_host_links("action_hosts", "action_id", "actions",
                              action_id, host_ids, "A")
 
     def set_collection_hosts(self, collection_id: int, host_ids: list[int]) -> None:
+        old = set(self.collection_host_ids(collection_id))
         self._set_host_links("collection_hosts", "collection_id", "collections",
                              collection_id, host_ids, "C")
+        if old == set(host_ids):
+            return
+        # evidence in the collection follows the collection's host set — but
+        # only items still tracking the old set, so per-host expansion items
+        # (deliberate subsets) keep their single host
+        for r in self.conn.execute(
+                "SELECT id FROM evidence WHERE collection_id = ?",
+                (collection_id,)):
+            if set(self.evidence_host_ids(r["id"])) == old:
+                self.set_evidence_hosts(r["id"], list(host_ids))
 
     def finding_host_ids(self, finding_id: int) -> list[int]:
         return [r["host_id"] for r in self.conn.execute(
@@ -1032,6 +1058,11 @@ class Case:
         return [r["host_id"] for r in self.conn.execute(
             "SELECT host_id FROM evidence_hosts WHERE evidence_id = ? "
             "ORDER BY host_id", (evidence_id,))]
+
+    def action_host_ids(self, action_id: int) -> list[int]:
+        return [r["host_id"] for r in self.conn.execute(
+            "SELECT host_id FROM action_hosts WHERE action_id = ? "
+            "ORDER BY host_id", (action_id,))]
 
     def _host_links(self, table: str) -> dict[int, list[dict]]:
         """{owner_id: [{id,name}]} for a host-link table; skips deleted hosts."""

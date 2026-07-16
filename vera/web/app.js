@@ -570,6 +570,15 @@ function hostPicker(initial, hint) {
   };
 }
 
+/* one-line "N host(s): a, b, c +4 more" summary for read-only host notes */
+function hostNames(hosts) {
+  const names = (hosts || []).map((h) => h.name);
+  if (!names.length) return "";
+  const shown = names.slice(0, 10).join(", ");
+  const more = names.length > 10 ? ` +${names.length - 10} more` : "";
+  return `${names.length} host(s): ${shown}${more}`;
+}
+
 /* ---------- finding form (shared: add + edit) ---------- */
 
 function findingForm({ actionId, inheritHosts, existing, done, close }) {
@@ -1281,6 +1290,29 @@ function openEvidenceEditor(e) {
     }, `C${c.id} ${c.name}`))) : null;
   const picker = hostPicker(e.hosts || [],
     "Source host(s) — which system(s) this evidence came from.");
+  // hosts are editable only for standalone evidence; in a collection they are
+  // managed on the collection (and re-derived if the evidence moves into one)
+  const pickerWrap = el("div", {},
+    el("h4", { class: "host-panel-h" }, "Source host(s)"), picker.el);
+  const colNote = el("div", { class: "hint host-note" });
+  const syncHosts = () => {
+    const cid = colSel && colSel.value ? Number(colSel.value) : null;
+    pickerWrap.style.display = cid ? "none" : "";
+    colNote.style.display = cid ? "" : "none";
+    if (!cid) return;
+    if (cid === e.collection_id) {
+      const summary = hostNames(e.hosts);
+      colNote.textContent = (summary ? `source hosts — ${summary}. ` : "")
+        + `Managed via collection C${cid} — edit the collection to change them.`;
+    } else {
+      const c = collections.find((x) => x.id === cid);
+      const summary = c ? hostNames(c.hosts) : "";
+      colNote.textContent = summary
+        ? `will inherit from C${cid} on save — ${summary}`
+        : `will move into C${cid}, which has no hosts yet`;
+    }
+  };
+  if (colSel) colSel.addEventListener("change", syncHosts);
   const err = el("div", { class: "form-error" });
 
   const overlay = el("div", { class: "lightbox", onclick: () => overlay.remove() },
@@ -1293,19 +1325,22 @@ function openEvidenceEditor(e) {
         el("label", { class: "field wide" }, "SHA-256", shaI),
         el("label", { class: "field wide" }, "Source", sourceI),
         el("label", { class: "field wide" }, "Notes", notesI)),
-      el("h4", { class: "host-panel-h" }, "Source host(s)"),
-      picker.el,
+      pickerWrap,
+      colNote,
       el("div", { class: "form-actions" },
         el("button", { class: "btn primary", onclick: async () => {
           const label = labelI.value.trim();
           if (!label) { err.textContent = "a label is required"; return; }
           err.textContent = "";
+          const cid = colSel && colSel.value ? Number(colSel.value) : null;
           try {
             await api(`/api/evidence/${e.id}`, { method: "PATCH", body: {
               label, kind: kindI.value.trim(), sha256: shaI.value.trim(),
               source: sourceI.value.trim(), notes: notesI.value.trim(),
-              collection_id: colSel && colSel.value ? Number(colSel.value) : null,
-              host_ids: picker.ids(),
+              collection_id: cid,
+              // standalone evidence: hosts come from the picker; in a
+              // collection the server derives them when the link changes
+              ...(cid ? {} : { host_ids: picker.ids() }),
             }});
             overlay.remove();
             await reload();
@@ -1313,6 +1348,7 @@ function openEvidenceEditor(e) {
         } }, "Save"),
         el("button", { class: "btn", onclick: () => overlay.remove() }, "Cancel")),
       err));
+  syncHosts();
   document.body.append(overlay);
   setTimeout(() => labelI.focus(), 0);
 }
@@ -1324,7 +1360,7 @@ function openCollectionEditor(c) {
   const opI = el("input", { value: c.operator || "" });
   const scopeI = el("input", { value: c.scope || "" });
   const picker = hostPicker(c.hosts || [],
-    "Hosts this collection covers — evidence added to it inherits these.");
+    "Hosts this collection covers — evidence in it inherits and follows these (per-host items keep their own).");
   const err = el("div", { class: "form-error" });
   const overlay = el("div", { class: "lightbox", onclick: () => overlay.remove() },
     el("div", { class: "host-panel", onclick: (ev) => ev.stopPropagation() },
@@ -1367,7 +1403,7 @@ async function renderEvidence(view) {
       "provenance and the hosts it covers. Evidence added to it inherits those hosts."));
   colBtn.addEventListener("click", () => toggleForm(colBar, (close) => {
     const picker = hostPicker([],
-      "Hosts this collection covers — evidence added to it inherits these.");
+      "Hosts this collection covers — evidence in it inherits and follows these (per-host items keep their own).");
     return formCard({
       fields: [
         field("Collection name", textInput("name", "Lab2 amcache+shimcache export"), true),
@@ -1444,20 +1480,35 @@ async function renderEvidence(view) {
       "Register each evidence item (image, memory dump, triage collection) with its hash — " +
       "this is what makes the case reproducible."));
   addBtn.addEventListener("click", () => toggleForm(toolbar, (close) => {
+    // hosts are editable here only for standalone evidence; inside a
+    // collection they come from (and are edited on) the collection
     const picker = hostPicker([],
-      "Source host(s) — picking a collection fills these from its hosts; adjust as needed.");
+      "Source host(s) — which system(s) this evidence came from.");
+    const pickerField = field("Source host(s)", picker.el, true);
+    const colNote = el("div", { class: "hint host-note" });
+    const noteField = el("div", { class: "field wide" }, colNote);
     const cSel = colField();
-    if (cSel) cSel.addEventListener("change", () => {
-      const c = collections.find((x) => String(x.id) === cSel.value);
-      if (c && c.hosts && c.hosts.length) picker.addHosts(c.hosts);
-    });
+    const syncHosts = () => {
+      const c = cSel && collections.find((x) => String(x.id) === cSel.value);
+      pickerField.style.display = c ? "none" : "";
+      noteField.style.display = c ? "" : "none";
+      if (c) {
+        const summary = hostNames(c.hosts);
+        colNote.textContent = summary
+          ? `source hosts come from C${c.id}: ${summary}`
+          : `C${c.id} has no hosts yet — set them on the collection (Edit)`;
+      }
+    };
+    if (cSel) cSel.addEventListener("change", syncHosts);
+    syncHosts();
     return formCard({
       fields: [
         field("Label", textInput("label", "WS01 memory dump"), true),
         field("Kind", textInput("kind", "disk / memory / triage / logs")),
         field("SHA-256", textInput("sha256")),
         cSel ? field("Collection", cSel) : null,
-        field("Source host(s)", picker.el, true),
+        pickerField,
+        noteField,
         field("Source / acquisition detail", textInput("source"), true),
         field("Notes", el("textarea", { name: "notes" }), true),
       ],
@@ -1466,14 +1517,16 @@ async function renderEvidence(view) {
       onsubmit: async (data) => {
         const label = data.get("label").trim();
         if (!label) throw new Error("a label is required");
+        const inCollection = Boolean(data.get("collection_id"));
         await api("/api/evidence", { method: "POST", body: {
           label,
           kind: data.get("kind").trim(),
           sha256: data.get("sha256").trim(),
           source: data.get("source").trim(),
           notes: data.get("notes").trim(),
-          collection_id: data.get("collection_id") ? Number(data.get("collection_id")) : null,
-          host_ids: picker.ids(),
+          collection_id: inCollection ? Number(data.get("collection_id")) : null,
+          // in a collection the hosts derive from it (server side)
+          ...(inCollection ? {} : { host_ids: picker.ids() }),
         }});
         await reload();
       },

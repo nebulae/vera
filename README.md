@@ -114,9 +114,12 @@ retyping a name.
   compromised-hosts view derives itself instead of being maintained by hand.
 - **Collection** (`C#`) — a batch/sweep (e.g. a 40-host artifact export) with
   its provenance (tool, operator, scope) and the **hosts it covers**. Evidence
-  added to a collection inherits those hosts; `vera collection expand C1`
-  creates one evidence item per covered host in a single step, skipping hosts
-  that already have evidence in it.
+  in a collection sources its hosts from the collection — that's where they're
+  edited, and edits **follow through** to evidence (and steps) still tracking
+  the collection's set, while deliberately narrowed items (e.g. per-host
+  expansion) keep their own. Standalone evidence has its own host picker.
+  `vera collection expand C1` creates one evidence item per covered host in a
+  single step, skipping hosts that already have evidence in it.
 - **Coverage** — `vera coverage` (and the web Coverage tab) rolls up, per host,
   the evidence, steps, and findings that reference it, plus which tools were
   used and when it was last examined. Hosts with no analysis logged are called

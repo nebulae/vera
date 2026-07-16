@@ -1113,3 +1113,74 @@ def test_api_action_hosts_follow_evidence(running_server):
     tree = json.loads(_req(port, "GET", "/api/tree")[1])
     act = next(a for a in tree["roots"] if a["id"] == aid)
     assert act["hosts"] == []
+
+
+def test_evidence_hosts_derive_from_collection(case):
+    hs = [case.add_host(f"RD0{i}") for i in range(1, 4)]
+    col = case.add_collection("Lab export", host_ids=hs[:2])
+    # db-level inheritance: no host_ids -> the collection's set
+    e = case.add_evidence("bundle", collection_id=col)
+    assert case.evidence_host_ids(e) == sorted(hs[:2])
+    # explicit host_ids (per-host expansion path) still wins
+    e2 = case.add_evidence("Lab export — RD01", collection_id=col,
+                           host_ids=[hs[0]])
+    assert case.evidence_host_ids(e2) == [hs[0]]
+
+
+def test_collection_host_edits_follow_through(case):
+    hs = [case.add_host(f"RD0{i}") for i in range(1, 4)]
+    col = case.add_collection("Lab export", host_ids=hs[:2])
+    tracking = case.add_evidence("bundle", collection_id=col)         # RD01,RD02
+    perhost = case.add_evidence("bundle — RD01", collection_id=col,
+                                host_ids=[hs[0]])                     # RD01 only
+    step = case.add_action("hayabusa", evidence_id=tracking)          # RD01,RD02
+    override = case.add_action("x", evidence_id=tracking, host_ids=[hs[1]])
+    f = case.add_finding("hit", action_id=step,
+                         host_ids=case.action_host_ids(step))
+    # growing the collection flows to tracking evidence and its steps…
+    case.set_collection_hosts(col, hs)
+    assert case.evidence_host_ids(tracking) == sorted(hs)
+    assert case.action_host_ids(step) == sorted(hs)
+    # …but deliberate subsets and findings are untouched
+    assert case.evidence_host_ids(perhost) == [hs[0]]
+    assert case.action_host_ids(override) == [hs[1]]
+    assert case.finding_host_ids(f) == sorted(hs[:2])
+
+
+def test_api_evidence_hosts_collection_rules(running_server):
+    port = running_server
+    ids = json.loads(_req(port, "POST", "/api/hosts",
+                          {"names": ["RD01", "RD02"]})[1])["ids"]
+    cid = json.loads(_req(port, "POST", "/api/collections",
+                          {"name": "Lab", "host_ids": ids})[1])["id"]
+    # POST without host_ids inside a collection -> inherits its hosts
+    status, raw = _req(port, "POST", "/api/evidence",
+                       {"label": "bundle", "collection_id": cid})
+    assert status == 201
+    eid = json.loads(raw)["id"]
+    info = json.loads(_req(port, "GET", "/api/case")[1])
+    ev = next(e for e in info["evidence"] if e["id"] == eid)
+    assert {h["name"] for h in ev["hosts"]} == {"RD01", "RD02"}
+    # PATCH with the SAME collection leaves hosts alone (per-host items safe)
+    status, raw = _req(port, "POST", f"/api/collections/{cid}/expand", {})
+    assert json.loads(raw)["count"] == 0  # both hosts covered by 'bundle'? no:
+    # (bundle covers both, so expand creates nothing — separately narrow one)
+    status, raw = _req(port, "POST", "/api/evidence",
+                       {"label": "Lab — RD01", "collection_id": cid,
+                        "host_ids": [ids[0]]})
+    nid = json.loads(raw)["id"]
+    status, _ = _req(port, "PATCH", f"/api/evidence/{nid}",
+                     {"label": "Lab — RD01 (renamed)", "collection_id": cid})
+    assert status == 200
+    info = json.loads(_req(port, "GET", "/api/case")[1])
+    ev = next(e for e in info["evidence"] if e["id"] == nid)
+    assert [h["name"] for h in ev["hosts"]] == ["RD01"]
+    # PATCH that moves evidence into a collection re-derives from it
+    status, raw = _req(port, "POST", "/api/evidence", {"label": "loose"})
+    lid = json.loads(raw)["id"]
+    status, _ = _req(port, "PATCH", f"/api/evidence/{lid}",
+                     {"collection_id": cid})
+    assert status == 200
+    info = json.loads(_req(port, "GET", "/api/case")[1])
+    ev = next(e for e in info["evidence"] if e["id"] == lid)
+    assert {h["name"] for h in ev["hosts"]} == {"RD01", "RD02"}

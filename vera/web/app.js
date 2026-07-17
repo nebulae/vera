@@ -871,6 +871,16 @@ async function renderInvestigation(view) {
   }
 }
 
+// total findings in an action's whole drill-down subtree — its own findings
+// plus every finding under the follow-up actions they spawned
+function countSubtreeFindings(a) {
+  let n = (a.findings || []).length;
+  for (const f of a.findings || []) {
+    for (const child of f.actions || []) n += countSubtreeFindings(child);
+  }
+  return n;
+}
+
 // collapse state is keyed by node ref ("A8" / "F8") so actions and findings,
 // which share an integer id space, never collide.
 function allActionKeys(nodes, out = []) {
@@ -903,7 +913,7 @@ function actionCard(a) {
     : (a.hosts || []).map((h) =>
         el("span", { class: "host-chip mini", title: "jump to host",
           onclick: (ev) => { ev.stopPropagation(); state.tab = "hosts"; render(); } }, h.name));
-  const nFind = a.findings.length;
+  const nFind = countSubtreeFindings(a);   // rolls up the whole drill-down chain
   const evidenceTag = evidence ? el("span", { class: "evidence-tag",
     title: "jump to evidence",
     onclick: (ev) => { ev.stopPropagation(); state.tab = "evidence"; render(); } },
@@ -920,8 +930,8 @@ function actionCard(a) {
       ? el("span", { class: "meta", style: "color: var(--danger)" }, `exit ${a.exit_code}`) : null,
     collapsed ? el("span", { class: "meta collapsed-preview" },
       "— " + (manual ? `🔧 ${a.tool}` : `$ ${(a.command || "").split("\n")[0]}`)) : null,
-    collapsed && nFind ? el("span", { class: "meta find-count" },
-      `${nFind} finding${nFind > 1 ? "s" : ""}`) : null);
+    nFind ? el("span", { class: "meta find-count", title: "findings in this step's drill-down" },
+      `🔎 ${nFind} finding${nFind > 1 ? "s" : ""}`) : null);
   card.append(head);
   if (collapsed) return card;
 

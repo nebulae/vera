@@ -581,6 +581,8 @@ details.collapsible .proc-steps { margin-top: 6px; }
 
 /* host picker (strict select from registry) */
 .host-picker { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); }
+.host-editor { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+.host-edit-toggle { margin-top: 2px; }
 .host-picker-controls { display: flex; gap: 8px; margin: 8px 0; align-items: center; }
 .host-search {
   flex: 1;

@@ -467,7 +467,7 @@ function hostPicker(initial, hint) {
     for (const h of hs) { if (on) chosen.set(h.id, h); else chosen.delete(h.id); }
     refresh();
   }
-  function refresh() { refreshChips(); renderQuick(); renderList(); }
+  function refresh() { refreshChips(); renderQuick(); renderList(); syncEditBtn(); }
 
   function refreshChips() {
     chips.replaceChildren(...[...chosen.values()].map((h) =>
@@ -510,11 +510,13 @@ function hostPicker(initial, hint) {
     const rowOf = (label, chipList) => chipList.length
       ? el("div", { class: "host-quick-row segs" },
           el("span", { class: "quick-label" }, label), ...chipList) : null;
-    quickBar.replaceChildren(
+    // filter nulls — replaceChildren coerces a null arg into a literal "null"
+    quickBar.replaceChildren(...[
       el("div", { class: "host-quick-row" }, ...controls),
       rowOf("OS", osChips),
       rowOf("Segment", segChips),
-      rowOf("Status", statChips));
+      rowOf("Status", statChips),
+    ].filter(Boolean));
   }
 
   function renderList() {
@@ -578,13 +580,32 @@ function hostPicker(initial, hint) {
       if (addForm.style.display === "block") nameI.focus();
     } }, "+ new host");
 
+  // the full picker (search + quick-select + 36-row checklist) is a lot of
+  // real estate; keep it collapsed and show just the chosen chips until the
+  // analyst chooses to edit
+  const editor = el("div", { class: "host-editor", style: "display:none" },
+    el("div", { class: "host-picker-controls" }, search, addToggle),
+    addForm, quickBar, list);
+  const editBtn = el("button", { type: "button", class: "btn small ghost host-edit-toggle" });
+  const syncEditBtn = () => {
+    const open = editor.style.display !== "none";
+    editBtn.textContent = open ? "Done — hide picker ▴"
+      : (chosen.size ? "Edit hosts ▾" : "Choose hosts ▾");
+  };
+  editBtn.addEventListener("click", () => {
+    editor.style.display = editor.style.display === "none" ? "" : "none";
+    syncEditBtn();
+    if (editor.style.display !== "none") setTimeout(() => search.focus(), 0);
+  });
+
   const wrap = el("div", { class: "host-picker" },
     el("div", { class: "host-tags-head" },
       el("span", { class: "hint" }, hint || "Select from the registry."), count),
     chips,
-    el("div", { class: "host-picker-controls" }, search, addToggle),
-    addForm, quickBar, list);
+    editBtn,
+    editor);
   refresh();
+  syncEditBtn();
   return {
     el: wrap,
     ids: () => [...chosen.keys()],

@@ -126,15 +126,22 @@ def cmd_evidence(args) -> int:
                 host_ids = case.collection_host_ids(collection_id)
             else:
                 host_ids = []
+            sha = args.sha256 or ""
+            if args.hash_file:
+                sha = db.hash_file(args.hash_file)["sha256"]
             eid = case.add_evidence(args.label, kind=args.kind or "",
                                     source=args.source or "",
-                                    sha256=args.sha256 or "",
+                                    sha256=sha,
+                                    acquired_by=args.acquired_by or "",
+                                    acquired_at=args.acquired_at or "",
+                                    acquisition=args.acquisition or "",
                                     notes=args.note or "",
                                     collection_id=collection_id,
                                     host_ids=host_ids)
             where = f" (collection C{collection_id})" if collection_id else ""
             on = f" from {len(host_ids)} host(s)" if host_ids else ""
-            print(f"E{eid} added — {args.label}{where}{on}")
+            hashed = f"\n   sha256 {sha}" if args.hash_file else ""
+            print(f"E{eid} added — {args.label}{where}{on}{hashed}")
         elif args.evidence_cmd == "edit":
             kind, eid = db.resolve_ref(args.ref)
             if kind != "E":
@@ -142,10 +149,15 @@ def cmd_evidence(args) -> int:
             fields = {}
             for attr, col in (("label", "label"), ("kind", "kind"),
                               ("source", "source"), ("sha256", "sha256"),
+                              ("acquired_by", "acquired_by"),
+                              ("acquired_at", "acquired_at"),
+                              ("acquisition", "acquisition"),
                               ("note", "notes")):
                 val = getattr(args, attr)
                 if val is not None:
                     fields[col] = val
+            if args.hash_file:
+                fields["sha256"] = db.hash_file(args.hash_file)["sha256"]
             if args.collection is not None:
                 fields["collection_id"] = (None if args.collection.lower() == "none"
                                            else case.resolve_collection(args.collection))
@@ -173,6 +185,12 @@ def cmd_evidence(args) -> int:
                 print(line)
                 if e["source"]:
                     print(f"     source: {e['source']}")
+                custody = ", ".join(x for x in (
+                    e["acquired_by"] and f"by {e['acquired_by']}",
+                    e["acquired_at"] and f"at {e['acquired_at']}",
+                    e["acquisition"] and f"via {e['acquisition']}") if x)
+                if custody:
+                    print(f"     acquired: {custody}")
     return 0
 
 
@@ -939,6 +957,12 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--kind", help="disk / memory / triage / logs ...")
     pa.add_argument("--source", help="original path or acquisition detail")
     pa.add_argument("--sha256")
+    pa.add_argument("--hash-file", metavar="PATH",
+                    help="compute the sha256 from a local copy of the evidence")
+    pa.add_argument("--acquired-by", help="who collected/acquired it")
+    pa.add_argument("--acquired-at", help="when it was acquired (UTC)")
+    pa.add_argument("--acquisition",
+                    help="how it was acquired — tool/method, e.g. 'KAPE triage'")
     pa.add_argument("--collection", metavar="REF",
                     help="collection/batch this evidence belongs to (C2 or name)")
     pa.add_argument("--hosts", action="append", metavar="LIST",
@@ -951,6 +975,11 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--kind")
     pe.add_argument("--source")
     pe.add_argument("--sha256")
+    pe.add_argument("--hash-file", metavar="PATH",
+                    help="compute the sha256 from a local copy of the evidence")
+    pe.add_argument("--acquired-by", help="who collected/acquired it")
+    pe.add_argument("--acquired-at", help="when it was acquired (UTC)")
+    pe.add_argument("--acquisition", help="how it was acquired — tool/method")
     pe.add_argument("--note", help="notes")
     pe.add_argument("--collection", metavar="REF",
                     help="collection ref (C2 / name), or 'none' to detach")

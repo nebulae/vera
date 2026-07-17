@@ -854,6 +854,10 @@ tr.host-row[title]:hover td { filter: brightness(1.06); }
 .cov-table td { white-space: nowrap; }
 .cov-n { text-align: center; color: var(--muted); }
 tr.cov-gap td { background: color-mix(in srgb, #d97706 10%, transparent); }
+/* missing chain-of-custody cell on the evidence table */
+td.cov-gap { color: #b45309; font-size: 12px; }
+@media (prefers-color-scheme: dark) { td.cov-gap { color: #fbbf24; } }
+.hash-file-btn { margin-left: auto; }
 
 /* one-shot notice (e.g. after expanding a collection) */
 .notice {

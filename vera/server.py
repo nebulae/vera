@@ -270,6 +270,9 @@ class Handler(BaseHTTPRequestHandler):
                 eid = case.add_evidence(
                     body.get("label", ""), kind=body.get("kind", ""),
                     source=body.get("source", ""), sha256=body.get("sha256", ""),
+                    acquired_by=body.get("acquired_by", ""),
+                    acquired_at=body.get("acquired_at", ""),
+                    acquisition=body.get("acquisition", ""),
                     notes=body.get("notes", ""),
                     collection_id=body.get("collection_id"),
                     host_ids=self._host_ids(case, body))

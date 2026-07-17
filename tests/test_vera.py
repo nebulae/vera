@@ -1649,3 +1649,71 @@ def test_exit_code_capture_and_coercion(case):
         case.add_action("grep x y", exit_code="nope")
     with pytest.raises(CaseError):
         case.update_action(a, exit_code="nope")
+
+
+# ---- v0.16.0: chain of custody -----------------------------------------
+
+def test_evidence_chain_of_custody_roundtrip(case):
+    e = case.add_evidence("RD01 triage", kind="triage",
+                          acquired_by="trinity", acquired_at="2026-07-10 09:00 UTC",
+                          acquisition="KAPE triage")
+    row = next(x for x in case.evidence() if x["id"] == e)
+    assert row["acquired_by"] == "trinity"
+    assert row["acquired_at"] == "2026-07-10 09:00 UTC"
+    assert row["acquisition"] == "KAPE triage"
+    case.update_evidence(e, acquired_by="mouse", acquisition="FTK Imager E01")
+    row = next(x for x in case.evidence() if x["id"] == e)
+    assert row["acquired_by"] == "mouse" and row["acquisition"] == "FTK Imager E01"
+
+
+def test_migration_v13_adds_custody_and_backs_up(tmp_path):
+    # build a v12-era case by creating a current one and rolling meta back is
+    # not possible; instead simulate: create current case, drop the columns via
+    # a fresh minimal schema copy. Simplest faithful check: open a pre-v13 fixture
+    # made by stripping the columns from a new file.
+    p = str(tmp_path / "old.vera")
+    with Case(p, create=True) as c:
+        c.add_evidence("mem dump", kind="memory")
+    # rewind: remove custody columns + mark schema 12
+    conn = sqlite3.connect(p)
+    with conn:
+        for col in ("acquired_by", "acquired_at", "acquisition"):
+            conn.execute(f"ALTER TABLE evidence DROP COLUMN {col}")
+        conn.execute("UPDATE case_meta SET value='12' WHERE key='schema_version'")
+    conn.close()
+    with Case(p) as c2:  # migrates 12 -> 13
+        row = c2.evidence()[0]
+        assert row["acquired_by"] == "" and row["acquisition"] == ""
+        assert c2.meta()["schema_version"] == "13"
+    assert os.path.exists(p + ".pre-v12")   # auto-backup before migrating
+    # the backup still opens and holds the old schema's data
+    bconn = sqlite3.connect(p + ".pre-v12")
+    assert bconn.execute("SELECT label FROM evidence").fetchone()[0] == "mem dump"
+    bconn.close()
+
+
+def test_evidence_hash_file_cli(tmp_path, capsys):
+    target = tmp_path / "evil.bin"
+    target.write_bytes(b"malware sample")
+    import hashlib
+    want = hashlib.sha256(b"malware sample").hexdigest()
+    casep = str(tmp_path / "c.vera")
+    assert main(["init", casep, "--name", "T"]) == 0
+    assert main(["--case", casep, "evidence", "add", "sample",
+                 "--hash-file", str(target),
+                 "--acquired-by", "trinity", "--acquisition", "manual copy"]) == 0
+    out = capsys.readouterr().out
+    assert want in out
+    with Case(casep) as c:
+        e = c.evidence()[0]
+        assert e["sha256"] == want and e["acquired_by"] == "trinity"
+
+
+def test_evidence_csv_sheet(case, tmp_path):
+    case.add_evidence("RD01 triage", kind="triage", acquired_by="trinity",
+                      acquired_at="2026-07-10 09:00 UTC", acquisition="KAPE",
+                      sha256="ab" * 32)
+    written = export.export(case, "csv", str(tmp_path / "out"))
+    ev_csv = next(p for p in written if p.endswith("_Evidence.csv"))
+    text = open(ev_csv).read()
+    assert "Acquired By" in text and "trinity" in text and "KAPE" in text

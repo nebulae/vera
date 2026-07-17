@@ -205,6 +205,18 @@ async function reload(jumpTo = null) {
   await render();
 }
 
+// re-render while keeping a given node (e.g. a card being collapsed) pinned to
+// the same viewport position, so toggling collapse doesn't jump to the top
+async function renderKeepingInView(anchorId) {
+  const before = document.getElementById(anchorId);
+  const top = before ? before.getBoundingClientRect().top : null;
+  await render();
+  if (top !== null) {
+    const after = document.getElementById(anchorId);
+    if (after) window.scrollBy(0, after.getBoundingClientRect().top - top);
+  }
+}
+
 /* ---------- shared form machinery ---------- */
 
 function field(labelText, input, wide = false) {
@@ -693,8 +705,10 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
 
 /* ---------- action form (shared: add + edit + follow-up) ---------- */
 
-function actionForm({ parentFindingId, existing, done, close }) {
-  const isManual = existing ? existing.method === "manual" : false;
+function actionForm({ parentFindingId, existing, template, done, close }) {
+  // `existing` = edit (PATCH); `template` = clone (pre-filled new step, POST)
+  const seed = existing || template || null;
+  const isManual = seed ? seed.method === "manual" : false;
 
   const method = el("select", { name: "method" },
     el("option", { value: "command", selected: isManual ? null : "" }, "Command (CLI)"),
@@ -704,17 +718,17 @@ function actionForm({ parentFindingId, existing, done, close }) {
   for (const e of state.info.evidence) {
     evOptions.push(el("option", {
       value: String(e.id),
-      selected: existing && existing.evidence_id === e.id ? "" : null,
+      selected: seed && seed.evidence_id === e.id ? "" : null,
     }, `E${e.id} ${e.label}`));
   }
 
   const commandField = field("Exact command line you ran", el("textarea", {
     name: "command", placeholder: "vol.py -f WS01.mem windows.pstree",
-  }, existing ? existing.command : ""), true);
+  }, seed ? seed.command : ""), true);
   const procedureField = field("Steps to reproduce (what you did in the tool)",
     el("textarea", { name: "procedure",
       placeholder: "In Registry Explorer, open NTUSER.DAT → …\\CurrentVersion\\Run",
-    }, existing ? existing.procedure : ""), true);
+    }, seed ? seed.procedure : ""), true);
   const outputField = existing ? null
     : field("Captured output (paste, optional)", el("textarea", { name: "output" }), true);
   const shots = existing ? null
@@ -722,7 +736,7 @@ function actionForm({ parentFindingId, existing, done, close }) {
         "📎 Screenshot(s) of the result — drop, choose, or paste. Add several views if useful.");
 
   const toolField = field("Tool", textInput("tool",
-    "Registry Explorer, Timeline Explorer …", existing ? existing.tool : ""));
+    "Registry Explorer, Timeline Explorer …", seed ? seed.tool : ""));
 
   // hosts belong to evidence/collections, not individual steps — the step's
   // hosts derive from the evidence it examines, shown here read-only
@@ -761,14 +775,14 @@ function actionForm({ parentFindingId, existing, done, close }) {
     commandField,
     procedureField,
     field("Why you did it / notes", el("textarea", { name: "notes" },
-      existing ? existing.notes : ""), true),
+      seed ? seed.notes : ""), true),
     outputField,
     shots ? field("Screenshot", shots.el, true) : null,
   ];
 
   const form = formCard({
     fields: fieldsEls,
-    submitLabel: existing ? "Save step" : "Log step",
+    submitLabel: existing ? "Save step" : (template ? "Create clone" : "Log step"),
     oncancel: close,
     onsubmit: async (data) => {
       const m = data.get("method");
@@ -793,7 +807,8 @@ function actionForm({ parentFindingId, existing, done, close }) {
         await done(existing.id);
       } else {
         payload.output = m === "command" ? (data.get("output") || "") : "";
-        payload.parent_finding_id = parentFindingId ?? null;
+        payload.parent_finding_id = parentFindingId
+          ?? (template ? template.parent_finding_id : null) ?? null;
         const res = await api("/api/actions", { method: "POST", body: payload });
         if (shots) await uploadPending("action", res.id, shots);
         await refreshInfo();
@@ -877,7 +892,7 @@ function actionCard(a) {
   const toggle = () => {
     if (state.collapsed.has(key)) state.collapsed.delete(key);
     else state.collapsed.add(key);
-    render();
+    renderKeepingInView(`node-A${a.id}`);
   };
   const caret = el("button", { class: "collapse-toggle",
     title: collapsed ? "expand action" : "collapse action" }, collapsed ? "▸" : "▾");
@@ -956,7 +971,12 @@ function actionCard(a) {
   const editBtn = el("button", { class: "btn small ghost" }, "Edit");
   editBtn.addEventListener("click", () => toggleForm(tools, (close) =>
     actionForm({ existing: a, done: (id) => reload(`node-A${id}`), close })));
-  tools.append(addFindingBtn, editBtn,
+  const cloneBtn = el("button", { class: "btn small ghost",
+    title: "log a new step pre-filled from this one" }, "Clone");
+  cloneBtn.addEventListener("click", () => toggleForm(tools, (close) =>
+    actionForm({ template: a, parentFindingId: a.parent_finding_id,
+      done: (id) => reload(`node-A${id}`), close })));
+  tools.append(addFindingBtn, editBtn, cloneBtn,
     shotButton("action", a.id, "exhibit", () => reload(`node-A${a.id}`)));
   card.append(tools);
 
@@ -979,7 +999,7 @@ function findingCard(f) {
   const toggle = () => {
     if (state.collapsed.has(key)) state.collapsed.delete(key);
     else state.collapsed.add(key);
-    render();
+    renderKeepingInView(`node-F${f.id}`);
   };
   const caret = el("button", { class: "collapse-toggle",
     title: collapsed ? "expand finding" : "collapse finding" }, collapsed ? "▸" : "▾");

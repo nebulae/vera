@@ -1459,3 +1459,37 @@ def test_cli_clone(cli_case, capsys):
     assert main(["show", "F2"]) == 0
     show = capsys.readouterr().out
     assert "narrator.exe" in show and "gadget.js" in show  # title overridden, path copied
+
+
+def test_clone_action(case):
+    case.add_host("RD08")
+    e = case.add_evidence("autoruns csvs", host_ids=[case.resolve_host("RD08")])
+    a = case.add_action("Select-String gadget.js *.csv", evidence_id=e,
+                        notes="find the host", output="rd08 hit\n")
+    f = case.add_finding("gadget.js", action_id=a)
+    a2 = case.add_action("Select-String stun.exe *.csv", parent_finding_id=f)
+    clone = case.clone_action(a2)
+    got = case.get_action(clone)
+    assert clone != a2
+    assert got["command"] == "Select-String stun.exe *.csv"
+    assert got["parent_finding_id"] == f     # keeps the drill-down linkage
+    # cloning the evidence-bound step copies evidence + derives hosts, not output
+    clone1 = case.get_action(case.clone_action(a))
+    assert clone1["evidence_id"] == e
+    assert [h["name"] for h in clone1["hosts"]] == ["RD08"]
+    assert clone1["output"] == ""            # output is a fresh capture, not copied
+    assert clone1["notes"] == "find the host"
+    # override wins
+    clone2 = case.get_action(case.clone_action(a, command="Select-String x *.csv"))
+    assert clone2["command"] == "Select-String x *.csv"
+
+
+def test_cli_clone_action(cli_case, capsys):
+    assert main(["run", "Select-String gadget.js *.csv", "--note", "find host"]) == 0
+    capsys.readouterr()
+    assert main(["clone", "A1"]) == 0
+    out = capsys.readouterr().out
+    assert "cloned from A1" in out
+    assert main(["show", "A2"]) == 0
+    show = capsys.readouterr().out
+    assert "Select-String gadget.js" in show

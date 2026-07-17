@@ -571,6 +571,28 @@ class Case:
             self.set_action_hosts(aid, host_ids)
         return aid
 
+    def clone_action(self, action_id: int, **overrides) -> int:
+        """Duplicate an action (command/procedure, tool, method, evidence,
+        collection, hosts, notes, and the finding it hangs off) into a new step,
+        for logging a similar step without re-typing. Captured output and
+        attachments are NOT copied — a clone is a fresh run you re-capture.
+        Keyword overrides replace the copied value."""
+        src = self.get_action(action_id)
+        fields = {
+            "command": src.get("command", ""),
+            "host": src.get("host", ""),
+            "tool": src.get("tool", ""),
+            "evidence_id": src.get("evidence_id"),
+            "notes": src.get("notes", ""),
+            "parent_finding_id": src.get("parent_finding_id"),
+            "method": src.get("method", "command"),
+            "procedure": src.get("procedure", ""),
+            "collection_id": src.get("collection_id"),
+            "host_ids": [h["id"] for h in src.get("hosts", [])] or None,
+        }
+        fields.update(overrides)
+        return self.add_action(**fields)
+
     def last_action_id(self) -> int | None:
         row = self.conn.execute("SELECT MAX(id) AS m FROM actions").fetchone()
         return row["m"]

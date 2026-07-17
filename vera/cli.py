@@ -649,12 +649,19 @@ def cmd_lead(args) -> int:
 
 
 def cmd_clone(args) -> int:
-    fid_src = _resolve_finding_ref(args.ref)
+    kind, src_id = db.resolve_ref(args.ref)
+    if kind not in ("A", "F"):
+        raise CaseError("clone expects an action (A#) or finding (F#) reference")
     with open_case(args) as case:
-        overrides = {"title": args.title} if args.title else {}
-        new_id = case.clone_finding(fid_src, **overrides)
-        print(f"{fid(new_id)} cloned from F{fid_src} — edit it with "
-              f"'vera edit F{new_id} …'")
+        if kind == "F":
+            overrides = {"title": args.title} if args.title else {}
+            new_id = case.clone_finding(src_id, **overrides)
+            print(f"{fid(new_id)} cloned from F{src_id} — edit it with "
+                  f"'vera edit F{new_id} …'")
+        else:
+            new_id = case.clone_action(src_id)
+            print(f"{aid(new_id)} cloned from A{src_id} — edit it with "
+                  f"'vera edit A{new_id} …'")
     return 0
 
 
@@ -1024,10 +1031,11 @@ def build_parser() -> argparse.ArgumentParser:
                                          "artifact name, regardless of path")
     p.set_defaults(func=cmd_artifacts)
 
-    p = sub.add_parser("clone", help="duplicate a finding (for similar entries) "
-                                     "without re-typing everything")
-    p.add_argument("ref", help="the finding to clone, e.g. F9")
-    p.add_argument("--title", help="title for the clone (default: same as source)")
+    p = sub.add_parser("clone", help="duplicate an action or finding (for similar "
+                                     "entries) without re-typing everything")
+    p.add_argument("ref", help="the action or finding to clone, e.g. A6 or F9")
+    p.add_argument("--title", help="title for a cloned finding (default: same as "
+                                   "source; ignored for actions)")
     p.set_defaults(func=cmd_clone)
 
     p = sub.add_parser("lead", help="triage worklists (leads) and their items")

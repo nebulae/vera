@@ -223,6 +223,14 @@ function field(labelText, input, wide = false) {
   return el("label", { class: "field" + (wide ? " wide" : "") }, labelText, input);
 }
 
+// like field() but a <div> instead of a <label>: use for composite controls
+// (e.g. the host picker) where a wrapping <label> would forward every click to
+// its first form control — which in the picker is a chip's × delete button.
+function divField(labelText, node, wide = false) {
+  return el("div", { class: "field div-field" + (wide ? " wide" : "") },
+    el("span", { class: "field-label" }, labelText), node);
+}
+
 function textInput(name, placeholder = "", value = "") {
   return el("input", { name, placeholder, value, autocomplete: "off" });
 }
@@ -723,7 +731,7 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
     field("Event time (in the incident)", textInput("event_time", "e.g. 2026-07-01 14:22",
       seed ? seed.event_time : "")),
     attrsGrid,
-    field("Affected host(s)", picker.el, true),
+    divField("Affected host(s)", picker.el, true),
     field("File hashes (optional)", hashGrid, true),
     field("Detail / evidence for this finding",
       el("textarea", { name: "detail" }, seed ? seed.detail : ""), true),
@@ -1846,7 +1854,7 @@ async function renderEvidence(view) {
         field("Tool", textInput("tool", "AmcacheParser / KAPE / Velociraptor …")),
         field("Operator", textInput("operator")),
         field("Scope", textInput("scope", "40 hosts, amcache+shimcache"), true),
-        field("Hosts covered", picker.el, true),
+        divField("Hosts covered", picker.el, true),
       ],
       submitLabel: "Add collection",
       oncancel: close,
@@ -1921,7 +1929,7 @@ async function renderEvidence(view) {
     // collection they come from (and are edited on) the collection
     const picker = hostPicker([],
       "Source host(s) — which system(s) this evidence came from.");
-    const pickerField = field("Source host(s)", picker.el, true);
+    const pickerField = divField("Source host(s)", picker.el, true);
     const colNote = el("div", { class: "hint host-note" });
     const noteField = el("div", { class: "field wide" }, colNote);
     const cSel = colField();

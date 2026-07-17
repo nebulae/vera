@@ -133,7 +133,9 @@ form.card, .form-grid { margin: 10px 0; }
   gap: 10px;
 }
 label.field { display: block; font-size: 12px; color: var(--muted); }
-label.field.wide { grid-column: 1 / -1; }
+label.field.wide, .div-field.wide { grid-column: 1 / -1; }
+.div-field { display: block; }
+.div-field > .field-label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
 label.field input, label.field select, label.field textarea {
   display: block;
   width: 100%;

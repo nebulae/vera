@@ -10,7 +10,7 @@ import sqlite3
 
 from . import types
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 OUTPUT_CAP = 256 * 1024        # chars of captured command output stored per action
 ATTACHMENT_CAP = 25 * 1024 * 1024  # max bytes per stored attachment
 
@@ -87,8 +87,9 @@ CREATE TABLE actions (
     parent_finding_id INTEGER REFERENCES findings(id)
 );
 CREATE TABLE findings (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    action_id  INTEGER REFERENCES actions(id),
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id   INTEGER REFERENCES actions(id),
+    evidence_id INTEGER REFERENCES evidence(id),
     created_at TEXT NOT NULL,
     event_time TEXT NOT NULL DEFAULT '',
     title      TEXT NOT NULL,
@@ -357,10 +358,23 @@ def _migrate_v11(conn: sqlite3.Connection) -> None:
                  "ON lead_items(lead_id)")
 
 
+def _migrate_v12(conn: sqlite3.Connection) -> None:
+    """v11 -> v12: findings carry the evidence they came from (inherited from
+    their action, cascades to follow-up actions)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
+    if "evidence_id" not in cols:
+        conn.execute("ALTER TABLE findings ADD COLUMN evidence_id INTEGER")
+    # backfill: existing findings inherit the evidence of the action they hang off
+    conn.execute(
+        "UPDATE findings SET evidence_id = "
+        "(SELECT a.evidence_id FROM actions a WHERE a.id = findings.action_id) "
+        "WHERE evidence_id IS NULL AND action_id IS NOT NULL")
+
+
 # Applied in ascending order to bring a case up to SCHEMA_VERSION.
 MIGRATIONS = {2: _migrate_v2, 3: _migrate_v3, 4: _migrate_v4, 5: _migrate_v5,
               6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8, 9: _migrate_v9,
-              10: _migrate_v10, 11: _migrate_v11}
+              10: _migrate_v10, 11: _migrate_v11, 12: _migrate_v12}
 
 
 class CaseError(Exception):
@@ -540,6 +554,13 @@ class Case:
             raise CaseError("a manual step needs a --tool (the tool you used)")
         if parent_finding_id is not None:
             self._require("findings", parent_finding_id, "F")
+            # a follow-up step examines the same evidence as the finding that
+            # prompted it (which got it from its own action) — cascade it down
+            if evidence_id is None:
+                row = self.conn.execute(
+                    "SELECT evidence_id FROM findings WHERE id = ?",
+                    (parent_finding_id,)).fetchone()
+                evidence_id = row["evidence_id"] if row else None
         if evidence_id is not None:
             self._require("evidence", evidence_id, "E")
         # an action inherits its collection AND its hosts from the evidence it
@@ -604,20 +625,29 @@ class Case:
                     detail: str = "", event_time: str = "",
                     attrs: dict | None = None, starred: bool = False,
                     host_ids: list[int] | None = None,
-                    hashes: dict | None = None) -> int:
+                    hashes: dict | None = None,
+                    evidence_id: int | None = None) -> int:
         if not title.strip():
             raise CaseError("finding title must not be empty")
         if action_id is not None:
             self._require("actions", action_id, "A")
+        # a finding carries the evidence it came from — inherited from its
+        # action when not given, so it can cascade to follow-up actions
+        if evidence_id is None and action_id is not None:
+            row = self.conn.execute("SELECT evidence_id FROM actions WHERE id = ?",
+                                    (action_id,)).fetchone()
+            evidence_id = row["evidence_id"] if row else None
+        if evidence_id is not None:
+            self._require("evidence", evidence_id, "E")
         clean_hashes = normalize_hashes(hashes)
         attrs = self._normalize_finding_attrs(ftype, attrs)
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO findings(action_id, created_at, event_time, title,"
-                " detail, ftype, host, attrs, hashes, starred)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (action_id, _now(), event_time, title, detail, ftype, host,
-                 json.dumps(attrs), json.dumps(clean_hashes), int(starred)))
+                "INSERT INTO findings(action_id, evidence_id, created_at,"
+                " event_time, title, detail, ftype, host, attrs, hashes, starred)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (action_id, evidence_id, _now(), event_time, title, detail, ftype,
+                 host, json.dumps(attrs), json.dumps(clean_hashes), int(starred)))
             fid = cur.lastrowid
         if host_ids:
             self.set_finding_hosts(fid, host_ids)
@@ -634,6 +664,7 @@ class Case:
             "title": src["title"],
             "ftype": src["ftype"],
             "action_id": src.get("action_id"),
+            "evidence_id": src.get("evidence_id"),
             "host": src.get("host", ""),
             "detail": src.get("detail", ""),
             "event_time": src.get("event_time", ""),
@@ -665,7 +696,7 @@ class Case:
                        "output", "performed_at", "evidence_id", "collection_id",
                        "parent_finding_id"}
     FINDING_EDITABLE = {"title", "detail", "ftype", "host", "event_time",
-                        "attrs", "hashes", "starred", "action_id"}
+                        "attrs", "hashes", "starred", "action_id", "evidence_id"}
     EVIDENCE_EDITABLE = {"label", "kind", "source", "sha256", "notes",
                          "collection_id"}
 
@@ -702,6 +733,8 @@ class Case:
                 self._normalize_finding_attrs(ftype, fields["attrs"]))
         if "hashes" in fields and isinstance(fields["hashes"], dict):
             fields["hashes"] = json.dumps(normalize_hashes(fields["hashes"]))
+        if fields.get("evidence_id") is not None:
+            self._require("evidence", fields["evidence_id"], "E")
         self._update("findings", self.FINDING_EDITABLE, finding_id, fields, "F")
 
     def _update(self, table: str, allowed: set, row_id: int,

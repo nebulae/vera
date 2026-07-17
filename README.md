@@ -140,6 +140,10 @@ retyping a name.
   DLL name seen in several app directories across hosts collapses into one entry
   that still lists every distinct full path and host, most-spread first. The
   **Host Indicators** tab defaults to this grouping too (toggle to a flat table).
+- **Evidence cascade** — the evidence flows down a drill-down chain so you never
+  re-pick it: a finding inherits the **evidence its action examined**, and a
+  follow-up action inherits **its finding's evidence** in turn (explicit choice
+  always wins). So `E4 → F8 → A7 → F9 …` all point back to the same evidence.
 - **Drill-down** — `vera run ... --from F3` links a new action to the finding
   that prompted it. That chain *is* the investigation.
 

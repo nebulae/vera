@@ -717,12 +717,19 @@ function starToggle(f) {
 
 /* ---------- finding form (shared: add + edit) ---------- */
 
-function findingForm({ actionId, inheritHosts, existing, template, done, close }) {
+function findingForm({ actionId, inheritHosts, inheritEvidence, existing, template, done, close }) {
   // `existing` = edit (PATCH); `template` = clone (pre-filled new finding, POST)
   const seed = existing || template || null;
   const typeSelect = el("select", { name: "ftype" },
     state.info.types.map((t) =>
       el("option", { value: t.key, selected: seed && seed.ftype === t.key ? "" : null }, t.label)));
+  // evidence the finding came from — pre-filled from the action's evidence
+  const seedEvidence = seed ? seed.evidence_id : inheritEvidence;
+  const evSelect = el("select", { name: "evidence_id" },
+    el("option", { value: "" }, "— none —"),
+    ...state.info.evidence.map((e) => el("option", {
+      value: String(e.id), selected: seedEvidence === e.id ? "" : null,
+    }, `E${e.id} ${e.label}`)));
   const attrsGrid = el("div", { class: "form-grid", style: "grid-column: 1 / -1;" });
 
   function renderAttrFields() {
@@ -789,6 +796,7 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
     field("Type", typeSelect),
     field("Event time (in the incident)", textInput("event_time", "e.g. 2026-07-01 14:22",
       seed ? seed.event_time : "")),
+    state.info.evidence.length ? field("Evidence it came from", evSelect) : null,
     attrsGrid,
     el("div", { class: "field wide" }, picker.el),
     field("File hashes (optional)", hashGrid, true),
@@ -819,6 +827,7 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
         attrs,
         hashes,
         starred: starred ? 1 : 0,
+        evidence_id: evSelect.value ? Number(evSelect.value) : null,
         host_ids: picker.ids(),
       };
       if (!payload.title) throw new Error("a title is required");
@@ -841,10 +850,12 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
 
 /* ---------- action form (shared: add + edit + follow-up) ---------- */
 
-function actionForm({ parentFindingId, existing, template, done, close }) {
+function actionForm({ parentFindingId, existing, template, inheritEvidence, done, close }) {
   // `existing` = edit (PATCH); `template` = clone (pre-filled new step, POST)
   const seed = existing || template || null;
   const isManual = seed ? seed.method === "manual" : false;
+  // a follow-up step examines the same evidence as the finding it drills into
+  const seedEvidence = seed ? seed.evidence_id : inheritEvidence;
 
   const method = el("select", { name: "method" },
     el("option", { value: "command", selected: isManual ? null : "" }, "Command (CLI)"),
@@ -854,7 +865,7 @@ function actionForm({ parentFindingId, existing, template, done, close }) {
   for (const e of state.info.evidence) {
     evOptions.push(el("option", {
       value: String(e.id),
-      selected: seed && seed.evidence_id === e.id ? "" : null,
+      selected: seedEvidence === e.id ? "" : null,
     }, `E${e.id} ${e.label}`));
   }
 
@@ -1106,7 +1117,7 @@ function actionCard(a) {
   const tools = el("div", { class: "node-tools" });
   const addFindingBtn = el("button", { class: "btn small" }, "+ Finding");
   addFindingBtn.addEventListener("click", () => openFormModal(`Add a finding to A${a.id}`, (close) =>
-    findingForm({ actionId: a.id, inheritHosts: a.hosts || [],
+    findingForm({ actionId: a.id, inheritHosts: a.hosts || [], inheritEvidence: a.evidence_id,
       done: (id) => { close(); reload(`node-F${id}`); }, close })));
   const editBtn = el("button", { class: "btn small ghost" }, "Edit");
   editBtn.addEventListener("click", () => openFormModal(`Edit A${a.id}`, (close) =>
@@ -1150,12 +1161,17 @@ function findingCard(f) {
   const leadDone = isLead && f.item_total && f.item_resolved === f.item_total;
   const leadProgress = isLead ? el("span", { class: "lead-progress" + (leadDone ? " done" : "") },
     f.item_total ? `${f.item_resolved} of ${f.item_total} triaged` : "no items yet") : null;
+  const evidence = state.info.evidence.find((e) => e.id === f.evidence_id);
+  const evidenceTag = evidence ? el("span", { class: "evidence-tag", title: "jump to evidence",
+    onclick: (ev) => { ev.stopPropagation(); state.tab = "evidence"; render(); } },
+    `📁 E${evidence.id} ${evidence.label}`) : null;
   card.append(el("div", { class: "node-head clickable", onclick: toggle },
     caret,
     el("span", { class: `ref ${isLead ? "l" : "f"}` }, `F${f.id}`),
     el("span", { class: `tag${isLead ? " lead" : ""}` }, t.label),
     star,
     el("span", { class: "node-title", title: f.title }, f.title),
+    evidenceTag,
     hostsInline(f.affected_hosts),
     el("span", { class: "spacer" }),
     collapsed && nAct ? el("span", { class: "meta find-count", title: "follow-up actions" },
@@ -1200,7 +1216,8 @@ function findingCard(f) {
   const tools = el("div", { class: "node-tools" });
   const followBtn = el("button", { class: "btn small" }, "+ Follow-up action");
   followBtn.addEventListener("click", () => openFormModal(`Follow-up action from F${f.id}`, (close) =>
-    actionForm({ parentFindingId: f.id, done: (id) => { close(); reload(`node-A${id}`); }, close })));
+    actionForm({ parentFindingId: f.id, inheritEvidence: f.evidence_id,
+      done: (id) => { close(); reload(`node-A${id}`); }, close })));
   const editBtn = el("button", { class: "btn small ghost" }, "Edit");
   editBtn.addEventListener("click", () => openFormModal(`Edit F${f.id}`, (close) =>
     findingForm({ existing: f, done: (id) => { close(); reload(`node-F${id}`); }, close })));

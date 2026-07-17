@@ -1562,10 +1562,14 @@ function leadCard(L) {
     card.append(el("details", { class: "output" },
       el("summary", {}, "worklist detail"), el("pre", {}, L.detail)));
   }
-  const items = el("div", { class: "lead-items" });
-  for (const it of L.items) items.append(leadItemRow(it));
-  items.append(addItemRow(L.id));
-  card.append(items);
+  const table = el("table", { class: "lead-table" },
+    L.items.length ? el("thead", {}, el("tr", {},
+      el("th", { class: "lead-th-status" }, "Status"),
+      el("th", {}, "Item"),
+      el("th", {}, "Resolved by"),
+      el("th", {}))) : null,
+    el("tbody", {}, ...L.items.map(leadItemTr), addItemTr(L.id)));
+  card.append(el("div", { class: "lead-scroll" }, table));
   return card;
 }
 
@@ -1574,47 +1578,56 @@ function parseFindingRef(v) {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
-function leadItemRow(it) {
-  const sel = el("select", { class: "cell-select lead-status" },
+function leadStatusSelect(it) {
+  const sel = el("select", { class: `lead-status st-${it.status}` },
     LEAD_STATUSES.map((s) =>
       el("option", { value: s, selected: it.status === s ? "" : null }, s)));
   sel.addEventListener("change", async () => {
     await api(`/api/lead_items/${it.id}`, { method: "PATCH", body: { status: sel.value } });
     await reload();
   });
-  let linkCell;
-  if (it.finding) {
-    linkCell = el("span", { class: "lead-finding" },
-      refLink(`F${it.finding.id}`, `node-F${it.finding.id}`), " ",
-      el("span", { class: "meta" }, (it.finding.starred ? "★ " : "") + it.finding.title));
-  } else {
-    const inp = el("input", { class: "lead-link-input", placeholder: "→ link F#" });
-    const commit = async () => {
-      const fid = parseFindingRef(inp.value);
-      if (!fid) { inp.value = ""; return; }
-      try {
-        await api(`/api/lead_items/${it.id}`, { method: "PATCH", body: { finding_id: fid } });
-        await reload();
-      } catch (e) { inp.value = ""; inp.placeholder = String(e.message || e); }
-    };
-    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") commit(); });
-    inp.addEventListener("blur", commit);
-    linkCell = inp;
-  }
-  const del = el("button", { class: "chip-x", title: "remove item" }, "✕");
+  return sel;
+}
+
+function leadLinkInput(it) {
+  const inp = el("input", { class: "lead-link-input", placeholder: "link F#…" });
+  const commit = async () => {
+    const fid = parseFindingRef(inp.value);
+    if (!fid) { inp.value = ""; return; }
+    try {
+      await api(`/api/lead_items/${it.id}`, { method: "PATCH", body: { finding_id: fid } });
+      await reload();
+    } catch (e) { inp.value = ""; inp.placeholder = String(e.message || e); }
+  };
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") commit(); });
+  inp.addEventListener("blur", commit);
+  return inp;
+}
+
+function leadItemTr(it) {
+  const resolved = it.finding
+    ? el("span", { class: "lead-finding" },
+        refLink(`F${it.finding.id}`, `node-F${it.finding.id}`),
+        el("span", { class: "meta lead-fin-title" },
+          (it.finding.starred ? " ★ " : " ") + it.finding.title))
+    : leadLinkInput(it);
+  const del = el("button", { class: "icon-x", title: "remove item" }, "✕");
   del.addEventListener("click", async () => {
     if (!confirm(`Remove worklist item “${it.label}”?`)) return;
     await api(`/api/lead_items/${it.id}`, { method: "DELETE" });
     await reload();
   });
-  return el("div", { class: `lead-item st-item-${it.status}` },
-    sel, el("span", { class: "lead-label" }, it.label), linkCell, del);
+  return el("tr", { class: `lead-tr st-item-${it.status}` },
+    el("td", { class: "lead-status-cell" }, leadStatusSelect(it)),
+    el("td", { class: "lead-label" }, it.label),
+    el("td", { class: "lead-resolved" }, resolved),
+    el("td", { class: "lead-x" }, del));
 }
 
-function addItemRow(leadId) {
+function addItemTr(leadId) {
   const label = el("input", { class: "lead-add-label",
-    placeholder: "add worklist item (e.g. stun.exe)", autocomplete: "off" });
-  const findRef = el("input", { class: "lead-link-input", placeholder: "→ F# (optional)" });
+    placeholder: "add item, e.g. stun.exe", autocomplete: "off" });
+  const findRef = el("input", { class: "lead-link-input", placeholder: "link F# (optional)" });
   const add = async () => {
     const l = label.value.trim();
     if (!l) return;
@@ -1627,7 +1640,11 @@ function addItemRow(leadId) {
   const btn = el("button", { class: "btn small" }, "Add");
   btn.addEventListener("click", add);
   label.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
-  return el("div", { class: "lead-item lead-add" }, label, findRef, btn);
+  return el("tr", { class: "lead-add-tr" },
+    el("td", {}),
+    el("td", {}, label),
+    el("td", {}, findRef),
+    el("td", {}, btn));
 }
 
 /* ---------- evidence ---------- */

@@ -8,6 +8,7 @@
   --accent-ink: #ffffff;
   --action: #0e7490;
   --finding: #b45309;
+  --lead: #7c3aed;
   --star: #d97706;
   --danger: #b91c1c;
   --code-bg: #eef1f5;
@@ -23,6 +24,7 @@
     --accent: #3b82f6;
     --action: #22d3ee;
     --finding: #fbbf24;
+    --lead: #c4b5fd;
     --star: #fbbf24;
     --danger: #f87171;
     --code-bg: #10141b;
@@ -750,9 +752,17 @@ table.art-members { margin-top: 4px; }
 .path-list code { white-space: nowrap; }
 
 /* ---------- leads: triage worklists ---------- */
+/* leads get their own colour (violet) — distinct from action cyan and
+   finding amber, and away from the warning-yellow */
+.node-lead { border-left: 3px solid var(--lead); }
+.ref.l { color: var(--lead); background: color-mix(in srgb, var(--lead) 16%, transparent); }
+.tag.lead {
+  color: var(--lead); border-color: color-mix(in srgb, var(--lead) 45%, transparent);
+  background: color-mix(in srgb, var(--lead) 12%, transparent);
+}
 .lead-progress {
-  margin-left: auto; font-size: 12px; font-weight: 600; color: var(--finding);
-  background: color-mix(in srgb, var(--finding) 12%, transparent);
+  margin-left: auto; font-size: 12px; font-weight: 600; color: var(--lead);
+  background: color-mix(in srgb, var(--lead) 14%, transparent);
   border-radius: 6px; padding: 1px 8px;
 }
 .lead-progress.done { color: #16a34a;

@@ -970,7 +970,9 @@ function actionCard(a) {
 
 function findingCard(f) {
   const t = typeInfo(f.ftype);
-  const card = el("div", { class: "card node-finding", id: `node-F${f.id}` });
+  const isLead = f.ftype === "lead";
+  const card = el("div", { class: `card ${isLead ? "node-lead" : "node-finding"}`,
+    id: `node-F${f.id}` });
   const key = "F" + f.id;
   const collapsed = state.collapsed.has(key);
   if (collapsed) card.classList.add("collapsed");
@@ -995,8 +997,8 @@ function findingCard(f) {
   const nAct = (f.actions || []).length;
   card.append(el("div", { class: "node-head clickable", onclick: toggle },
     caret,
-    el("span", { class: "ref f" }, `F${f.id}`),
-    el("span", { class: "tag" }, t.label),
+    el("span", { class: `ref ${isLead ? "l" : "f"}` }, `F${f.id}`),
+    el("span", { class: `tag${isLead ? " lead" : ""}` }, t.label),
     star,
     el("span", { class: "node-title" }, f.title),
     f.host ? el("span", { class: "meta" }, `@${f.host}`) : null,
@@ -1006,7 +1008,10 @@ function findingCard(f) {
       `${nAct} follow-up${nAct > 1 ? "s" : ""}`) : null));
   if (collapsed) return card;
 
-  const chips = Object.entries(f.attrs || {}).filter(([, v]) => v);
+  // a lead is a worklist, not an indicator — don't show host-indicator-style
+  // artifact chips on it (its worklist lives in the Leads tab)
+  const chips = Object.entries(f.attrs || {})
+    .filter(([k, v]) => v && (!isLead || k === "source"));
   if (chips.length) {
     card.append(el("div", { class: "attr-chips" },
       chips.map(([k, v]) => el("span", {}, el("b", {}, k.replaceAll("_", " ") + ": "),
@@ -1020,12 +1025,26 @@ function findingCard(f) {
         onclick: () => navigator.clipboard && navigator.clipboard.writeText(v) },
         el("b", {}, (HLABEL[k] || k) + " "), el("code", {}, v)))));
   }
-  if (f.detail) card.append(el("div", { class: "notes" }, f.detail));
+  if (f.detail) {
+    // a lead's detail is usually a raw worklist dump — keep it collapsed so it
+    // doesn't dominate the tree; regular findings show their detail inline
+    if (isLead) {
+      card.append(el("details", { class: "output" },
+        el("summary", {}, "worklist detail"), el("pre", {}, f.detail)));
+    } else {
+      card.append(el("div", { class: "notes" }, f.detail));
+    }
+  }
 
   const strip = attachmentStrip(f.attachments, () => reload(`node-F${f.id}`));
   if (strip) card.append(strip);
 
   const tools = el("div", { class: "node-tools" });
+  if (isLead) {
+    const manageBtn = el("button", { class: "btn small" }, "Manage worklist →");
+    manageBtn.addEventListener("click", () => { state.tab = "type:lead"; render(); });
+    tools.append(manageBtn);
+  }
   const followBtn = el("button", { class: "btn small" }, "+ Follow-up action");
   followBtn.addEventListener("click", () => toggleForm(tools, (close) =>
     actionForm({ parentFindingId: f.id, done: (id) => reload(`node-A${id}`), close })));
@@ -1508,13 +1527,13 @@ function leadCard(L) {
     : "no items yet";
   const done = L.item_total && L.item_resolved === L.item_total;
   const head = el("div", { class: "node-head" },
-    el("span", { class: "ref f" }, `F${L.id}`),
-    el("span", { class: "tag" }, "lead"),
+    el("span", { class: "ref l" }, `F${L.id}`),
+    el("span", { class: "tag lead" }, "lead"),
     L.starred ? el("span", { class: "star" }, "★") : null,
     el("span", { class: "node-title" }, L.title),
     L.stack ? el("span", { class: "meta" }, `🖥 ${L.stack} hosts`) : null,
     el("span", { class: "lead-progress" + (done ? " done" : "") }, progress));
-  const card = el("div", { class: "card node-finding lead-card", id: `node-F${L.id}` }, head);
+  const card = el("div", { class: "card node-lead lead-card", id: `node-F${L.id}` }, head);
   if ((L.attrs || {}).source) {
     card.append(el("div", { class: "attr-chips" },
       el("span", {}, el("b", {}, "source: "), L.attrs.source)));

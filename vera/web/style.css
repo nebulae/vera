@@ -201,6 +201,21 @@ label.field input:focus, label.field select:focus, label.field textarea:focus {
   border-radius: 6px;
   padding: 1px 6px;
 }
+.evidence-tag {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 6px;
+  padding: 1px 7px;
+  cursor: pointer;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.evidence-tag:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .star { color: var(--star); cursor: pointer; user-select: none; }
 .star.off { opacity: 0.3; }
 .meta { color: var(--muted); font-size: 12px; }

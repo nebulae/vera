@@ -884,14 +884,18 @@ function actionCard(a) {
         el("span", { class: "host-chip mini", title: "jump to host",
           onclick: (ev) => { ev.stopPropagation(); state.tab = "hosts"; render(); } }, h.name));
   const nFind = a.findings.length;
+  const evidenceTag = evidence ? el("span", { class: "evidence-tag",
+    title: "jump to evidence",
+    onclick: (ev) => { ev.stopPropagation(); state.tab = "evidence"; render(); } },
+    `📁 E${evidence.id} ${evidence.label}`) : null;
   const head = el("div", { class: "node-head clickable", onclick: toggle },
     caret,
     el("span", { class: "ref a" }, `A${a.id}`),
     el("span", { class: "tag" }, a.tool || "action"),
+    evidenceTag,
     manual ? el("span", { class: "tag method" }, "manual") : null,
     ...hostChips,
     el("span", { class: "meta" }, a.performed_at),
-    evidence ? el("span", { class: "meta" }, `evidence: E${evidence.id} ${evidence.label}`) : null,
     a.exit_code !== null && a.exit_code !== undefined && a.exit_code !== 0
       ? el("span", { class: "meta", style: "color: var(--danger)" }, `exit ${a.exit_code}`) : null,
     collapsed ? el("span", { class: "meta collapsed-preview" },

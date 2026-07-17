@@ -908,6 +908,7 @@ table.lead-table tbody tr:last-child td { border-bottom: none; }
 .lead-label { font-family: var(--mono); font-weight: 600; white-space: nowrap; }
 .lead-tr.st-item-dismissed .lead-label { text-decoration: line-through; opacity: 0.55; }
 .lead-resolved { width: 100%; }
+.lead-investigate { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lead-fin-title { color: var(--muted); }
 .lead-x { width: 1%; text-align: right; }
 .lead-status {

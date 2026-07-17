@@ -850,7 +850,7 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
 
 /* ---------- action form (shared: add + edit + follow-up) ---------- */
 
-function actionForm({ parentFindingId, existing, template, inheritEvidence, done, close }) {
+function actionForm({ parentFindingId, existing, template, inheritEvidence, prefillNotes, done, close }) {
   // `existing` = edit (PATCH); `template` = clone (pre-filled new step, POST)
   const seed = existing || template || null;
   const isManual = seed ? seed.method === "manual" : false;
@@ -922,7 +922,7 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, done
     commandField,
     procedureField,
     field("Why you did it / notes", el("textarea", { name: "notes" },
-      seed ? seed.notes : ""), true),
+      seed ? seed.notes : (prefillNotes || "")), true),
     outputField,
     shots ? field("Screenshot", shots.el, true) : null,
   ];
@@ -1651,9 +1651,9 @@ const LEAD_STATUSES = ["open", "triaged", "dismissed"];
 async function renderLeads(view) {
   const leads = await api("/api/leads");
   view.replaceChildren(el("p", { class: "hint" },
-    "Leads are triage worklists (e.g. an LFO autoruns sweep) — work through each "
-    + "item and link it to the finding that resolved it. Leads stay out of the "
-    + "Artifacts and cross-host Stack views."));
+    "Leads are triage worklists (e.g. an LFO autoruns sweep) — investigate each "
+    + "item and link the finding it produced. Leads stay out of the Artifacts and "
+    + "cross-host Stack views."));
   const addBtn = el("button", { class: "btn primary" }, "+ New lead");
   addBtn.addEventListener("click", () => openFormModal("New lead", (close) =>
     formCard({
@@ -1720,9 +1720,9 @@ function leadWorklist(L) {
     items.length ? el("thead", {}, el("tr", {},
       el("th", { class: "lead-th-status" }, "Status"),
       el("th", {}, "Item"),
-      el("th", {}, "Resolved by"),
+      el("th", {}, "Investigation"),
       el("th", {}))) : null,
-    el("tbody", {}, ...items.map(leadItemTr), addItemTr(L.id)));
+    el("tbody", {}, ...items.map((it) => leadItemTr(it, L)), addItemTr(L.id)));
   return el("div", { class: "lead-scroll" }, table);
 }
 
@@ -1757,13 +1757,24 @@ function leadLinkInput(it) {
   return inp;
 }
 
-function leadItemTr(it) {
-  const resolved = it.finding
-    ? el("span", { class: "lead-finding" },
-        refLink(`F${it.finding.id}`, `node-F${it.finding.id}`),
-        el("span", { class: "meta lead-fin-title" },
-          (it.finding.starred ? " ★ " : " ") + it.finding.title))
-    : leadLinkInput(it);
+function leadItemTr(it, L) {
+  let investigation;
+  if (it.finding) {
+    investigation = el("span", { class: "lead-finding" },
+      refLink(`F${it.finding.id}`, `node-F${it.finding.id}`),
+      el("span", { class: "meta lead-fin-title" },
+        (it.finding.starred ? " ★ " : " ") + it.finding.title));
+  } else {
+    // not yet investigated — offer to spin up a follow-up action (evidence and
+    // hosts pre-filled from the lead) or link an existing finding
+    const investigate = el("button", { class: "btn small",
+      title: "log a follow-up action to investigate this item" }, "Investigate →");
+    investigate.addEventListener("click", () => openFormModal(`Investigate: ${it.label}`, (close) =>
+      actionForm({ parentFindingId: it.lead_id, inheritEvidence: L.evidence_id,
+        prefillNotes: `Investigating ${it.label} (lead F${it.lead_id})`,
+        done: (id) => { close(); reloadKeepingInView(`node-F${it.lead_id}`); }, close })));
+    investigation = el("div", { class: "lead-investigate" }, investigate, leadLinkInput(it));
+  }
   const del = el("button", { class: "icon-x", title: "remove item" }, "✕");
   del.addEventListener("click", async () => {
     if (!confirm(`Remove worklist item “${it.label}”?`)) return;
@@ -1773,7 +1784,7 @@ function leadItemTr(it) {
   return el("tr", { class: `lead-tr st-item-${it.status}` },
     el("td", { class: "lead-status-cell" }, leadStatusSelect(it)),
     el("td", { class: "lead-label" }, it.label),
-    el("td", { class: "lead-resolved" }, resolved),
+    el("td", { class: "lead-resolved" }, investigation),
     el("td", { class: "lead-x" }, del));
 }
 

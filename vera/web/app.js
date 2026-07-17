@@ -6,6 +6,7 @@ const state = {
   tab: "investigation",
   jumpTo: null,     // node id to scroll to after switching to investigation
   notice: null,     // one-shot message shown on the next render
+  collapsed: new Set(),  // action ids collapsed in the investigation view
 };
 
 // host disposition — '' means not yet triaged
@@ -811,8 +812,18 @@ async function renderInvestigation(view) {
   const addBtn = el("button", { class: "btn primary" }, "+ Log action");
   addBtn.addEventListener("click", () => toggleForm(toolbar, (close) =>
     actionForm({ done: (id) => reload(`node-A${id}`), close })));
+  const hasActions = tree.roots.length > 0;
+  const collapseAll = el("button", { class: "btn small ghost" }, "Collapse all");
+  collapseAll.addEventListener("click", () => {
+    state.collapsed = new Set(allActionIds(tree.roots));
+    render();
+  });
+  const expandAll = el("button", { class: "btn small ghost" }, "Expand all");
+  expandAll.addEventListener("click", () => { state.collapsed.clear(); render(); });
   const toolbar = el("div", { class: "toolbar" },
     addBtn,
+    hasActions ? collapseAll : null,
+    hasActions ? expandAll : null,
     el("span", { class: "hint" },
       "Each action is a command or tool run, in the order you worked. " +
       "Attach findings to actions; log follow-up actions from a finding to record your drill-down."));
@@ -843,15 +854,38 @@ async function renderInvestigation(view) {
   }
 }
 
+function allActionIds(nodes, out = []) {
+  for (const a of nodes) {
+    out.push(a.id);
+    for (const f of a.findings || []) allActionIds(f.actions || [], out);
+  }
+  return out;
+}
+
 function actionCard(a) {
   const card = el("div", { class: "card node-action", id: `node-A${a.id}` });
   const evidence = state.info.evidence.find((e) => e.id === a.evidence_id);
 
   const manual = a.method === "manual";
-  const hostChips = (a.hosts || []).map((h) =>
-    el("span", { class: "host-chip mini", title: "jump to host",
-      onclick: () => { state.tab = "hosts"; render(); } }, h.name));
-  card.append(el("div", { class: "node-head" },
+  const collapsed = state.collapsed.has(a.id);
+  if (collapsed) card.classList.add("collapsed");
+  const toggle = () => {
+    if (state.collapsed.has(a.id)) state.collapsed.delete(a.id);
+    else state.collapsed.add(a.id);
+    render();
+  };
+  const caret = el("button", { class: "collapse-toggle",
+    title: collapsed ? "expand action" : "collapse action" }, collapsed ? "▸" : "▾");
+  const nHosts = (a.hosts || []).length;
+  // collapsed: show a single host-count chip instead of the whole chip wall
+  const hostChips = collapsed
+    ? (nHosts ? [el("span", { class: "host-chip mini count" }, `🖥 ${nHosts}`)] : [])
+    : (a.hosts || []).map((h) =>
+        el("span", { class: "host-chip mini", title: "jump to host",
+          onclick: (ev) => { ev.stopPropagation(); state.tab = "hosts"; render(); } }, h.name));
+  const nFind = a.findings.length;
+  const head = el("div", { class: "node-head clickable", onclick: toggle },
+    caret,
     el("span", { class: "ref a" }, `A${a.id}`),
     el("span", { class: "tag" }, a.tool || "action"),
     manual ? el("span", { class: "tag method" }, "manual") : null,
@@ -859,7 +893,13 @@ function actionCard(a) {
     el("span", { class: "meta" }, a.performed_at),
     evidence ? el("span", { class: "meta" }, `evidence: E${evidence.id} ${evidence.label}`) : null,
     a.exit_code !== null && a.exit_code !== undefined && a.exit_code !== 0
-      ? el("span", { class: "meta", style: "color: var(--danger)" }, `exit ${a.exit_code}`) : null));
+      ? el("span", { class: "meta", style: "color: var(--danger)" }, `exit ${a.exit_code}`) : null,
+    collapsed ? el("span", { class: "meta collapsed-preview" },
+      "— " + (manual ? `🔧 ${a.tool}` : `$ ${(a.command || "").split("\n")[0]}`)) : null,
+    collapsed && nFind ? el("span", { class: "meta find-count" },
+      `${nFind} finding${nFind > 1 ? "s" : ""}`) : null);
+  card.append(head);
+  if (collapsed) return card;
 
   // The command / steps-to-reproduce body can be long (e.g. a multi-line
   // hunt query); collapse it behind a compact summary when it is, so it does

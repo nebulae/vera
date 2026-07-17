@@ -169,6 +169,20 @@ label.field input:focus, label.field select:focus, label.field textarea:focus {
 .children { margin-left: 22px; }
 
 .node-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.node-head.clickable { cursor: pointer; }
+.collapse-toggle {
+  border: none; background: none; color: var(--muted); cursor: pointer;
+  font-size: 12px; padding: 0 2px; line-height: 1; flex: none;
+  align-self: center;
+}
+.collapse-toggle:hover { color: var(--accent); }
+.node-action.collapsed { padding-top: 8px; padding-bottom: 8px; }
+.collapsed-preview {
+  font-family: var(--mono); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 48ch;
+}
+.find-count { color: var(--finding); font-weight: 600; }
+.host-chip.mini.count { cursor: default; }
 .ref {
   font-family: var(--mono);
   font-weight: 700;

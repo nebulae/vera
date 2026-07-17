@@ -1765,14 +1765,37 @@ function leadItemTr(it, L) {
       el("span", { class: "meta lead-fin-title" },
         (it.finding.starred ? " ★ " : " ") + it.finding.title));
   } else {
-    // not yet investigated — offer to spin up a follow-up action (evidence and
-    // hosts pre-filled from the lead) or link an existing finding
+    // not yet investigated — spin up a follow-up action, then a finding, and
+    // link that finding back to this item automatically (or link one by hand)
     const investigate = el("button", { class: "btn small",
-      title: "log a follow-up action to investigate this item" }, "Investigate →");
+      title: "log a follow-up action + finding to investigate this item" }, "Investigate →");
     investigate.addEventListener("click", () => openFormModal(`Investigate: ${it.label}`, (close) =>
-      actionForm({ parentFindingId: it.lead_id, inheritEvidence: L.evidence_id,
+      actionForm({
+        parentFindingId: it.lead_id,
+        inheritEvidence: L.evidence_id,
         prefillNotes: `Investigating ${it.label} (lead F${it.lead_id})`,
-        done: (id) => { close(); reloadKeepingInView(`node-F${it.lead_id}`); }, close })));
+        // after the action is logged, record the finding it turned up and link it
+        done: (actionId) => {
+          close();
+          openFormModal(`Finding from investigating ${it.label}`, (close2) => {
+            // canceling still keeps the action just logged — just reload to show it
+            const cancel = async () => { close2(); await reloadKeepingInView(`node-F${it.lead_id}`); };
+            return findingForm({
+              actionId,
+              inheritHosts: L.affected_hosts || [],
+              inheritEvidence: L.evidence_id,
+              done: async (findingId) => {
+                close2();
+                await api(`/api/lead_items/${it.id}`, { method: "PATCH",
+                  body: { finding_id: findingId } });
+                await reloadKeepingInView(`node-F${it.lead_id}`);
+              },
+              close: cancel,
+            });
+          });
+        },
+        close,
+      })));
     investigation = el("div", { class: "lead-investigate" }, investigate, leadLinkInput(it));
   }
   const del = el("button", { class: "icon-x", title: "remove item" }, "✕");

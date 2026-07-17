@@ -1418,3 +1418,44 @@ def test_lead_in_md_export(case):
     md = export.render_md(case)
     assert "Leads (triage worklists)" in md
     assert "narrator.exe" in md and "stun.exe" in md
+
+
+# ---- clone findings ----------------------------------------------------
+
+def test_clone_finding(case):
+    case.add_host("RD04")
+    a = case.add_action("grep", host_ids=[case.resolve_host("RD04")])
+    src = case.add_finding("Run key gadget.js", ftype="hostindicator",
+                           action_id=a, event_time="2026-07-01 14:22",
+                           attrs={"artifact": "gadget.js", "artifact_type": "Run key",
+                                  "path": r"c:\windows\update\gadget.js"},
+                           hashes={"md5": "7b0fe68e9a320f814ee956c7121c86b6"},
+                           host_ids=[case.resolve_host("RD04")], starred=True)
+    new = case.clone_finding(src)
+    a_f = {f["id"]: f for f in case.findings("hostindicator")}
+    c = a_f[new]
+    assert c["id"] != src
+    assert c["ftype"] == "hostindicator"
+    assert c["action_id"] == a
+    assert c["attrs"]["artifact"] == "gadget.js"
+    assert c["attrs"]["path"].endswith(r"gadget.js")
+    assert c["hashes"]["md5"] == "7b0fe68e9a320f814ee956c7121c86b6"
+    assert c["event_time"] == "2026-07-01 14:22"
+    assert [h["name"] for h in c["affected_hosts"]] == ["RD04"]
+    assert not c["starred"]           # clone starts un-starred
+    # override wins
+    new2 = case.clone_finding(src, title="Run key narrator.exe")
+    assert case.get_finding(new2)["title"] == "Run key narrator.exe"
+
+
+def test_cli_clone(cli_case, capsys):
+    assert main(["finding", "gadget.js", "-t", "hostindicator", "--on", "none",
+                 "--path", r"c:\windows\update\gadget.js"]) == 0
+    capsys.readouterr()
+    assert main(["clone", "F1", "--title", "narrator.exe"]) == 0
+    out = capsys.readouterr().out
+    assert "cloned from F1" in out
+    # the clone exists with the overridden title and copied attrs
+    assert main(["show", "F2"]) == 0
+    show = capsys.readouterr().out
+    assert "narrator.exe" in show and "gadget.js" in show  # title overridden, path copied

@@ -161,8 +161,11 @@ original run.
 
 `vera serve` opens a local-only viewer (127.0.0.1) with:
 
-- **Investigation** — the collapsible action→finding→action tree; add
-  actions/findings and edit anything inline
+- **Investigation** — the action→finding→action tree; add actions/findings and
+  edit anything inline. Every action and finding **collapses** (click its header,
+  or Collapse all / Expand all) so a large case stays scannable. **Clone** on a
+  finding opens a new one pre-filled from it (type, attrs, hashes, hosts, detail)
+  — enter a batch of similar findings without re-typing. (`vera clone F9` too.)
 - **Timeline** — every finding with an event time, in incident order
 - **Stack** — cross-host findings, rarest first (least-frequency triage)
 - **Hosts** — an **inline-editable** registry grid: click any cell, tab between

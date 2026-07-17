@@ -601,6 +601,27 @@ class Case:
             self.set_finding_hosts(fid, host_ids)
         return fid
 
+    def clone_finding(self, finding_id: int, **overrides) -> int:
+        """Duplicate a finding (type, detail, attrs, hashes, affected hosts, and
+        the action it hangs off) into a new one, for entering similar findings
+        without re-typing everything. Attachments are NOT copied (they are
+        evidence specific to the original); the clone starts un-starred. Any
+        keyword overrides (e.g. title=) replace the copied value."""
+        src = self.get_finding(finding_id)
+        fields = {
+            "title": src["title"],
+            "ftype": src["ftype"],
+            "action_id": src.get("action_id"),
+            "host": src.get("host", ""),
+            "detail": src.get("detail", ""),
+            "event_time": src.get("event_time", ""),
+            "attrs": dict(src.get("attrs") or {}),
+            "hashes": dict(src.get("hashes") or {}),
+            "host_ids": [h["id"] for h in src.get("affected_hosts", [])] or None,
+        }
+        fields.update(overrides)
+        return self.add_finding(**fields)
+
     def findings(self, ftype: str | None = None) -> list[dict]:
         if ftype:
             rows = self.conn.execute(

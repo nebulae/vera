@@ -588,15 +588,17 @@ function hostNames(hosts) {
 
 /* ---------- finding form (shared: add + edit) ---------- */
 
-function findingForm({ actionId, inheritHosts, existing, done, close }) {
+function findingForm({ actionId, inheritHosts, existing, template, done, close }) {
+  // `existing` = edit (PATCH); `template` = clone (pre-filled new finding, POST)
+  const seed = existing || template || null;
   const typeSelect = el("select", { name: "ftype" },
     state.info.types.map((t) =>
-      el("option", { value: t.key, selected: existing && existing.ftype === t.key ? "" : null }, t.label)));
+      el("option", { value: t.key, selected: seed && seed.ftype === t.key ? "" : null }, t.label)));
   const attrsGrid = el("div", { class: "form-grid", style: "grid-column: 1 / -1;" });
 
   function renderAttrFields() {
     const t = typeInfo(typeSelect.value);
-    const current = (existing && existing.attrs) || {};
+    const current = (seed && seed.attrs) || {};
     attrsGrid.replaceChildren(...t.fields.map((f) =>
       field(f.label, textInput(`attr:${f.key}`, f.hint || "", current[f.key] || ""))));
     // convenience: keep the stackable artifact name in sync with the path's
@@ -616,14 +618,14 @@ function findingForm({ actionId, inheritHosts, existing, done, close }) {
   const shots = existing ? null : pendingShots("exhibit",
     "📎 Attach screenshot proof — drop, choose, or paste. Several views are fine.");
   // a new finding inherits the host(s) of the action it hangs off — you can adjust
-  const initialHosts = existing ? existing.affected_hosts : (inheritHosts || []);
+  const initialHosts = seed ? seed.affected_hosts : (inheritHosts || []);
   const picker = hostPicker(initialHosts,
     "Affected host(s) — inherited from the action; adjust if the finding spans "
     + "more or fewer systems. Picking 2+ stacks it across hosts.");
 
   // hashes: md5 / sha1 / sha256 of the file this finding is about
   const HASHES = [["md5", "MD5", 32], ["sha1", "SHA-1", 40], ["sha256", "SHA-256", 64]];
-  const existingHashes = (existing && existing.hashes) || {};
+  const existingHashes = (seed && seed.hashes) || {};
   const hashInputs = {};
   const hashGrid = el("div", { class: "form-grid", style: "grid-column:1/-1" },
     HASHES.map(([key, label, len]) => {
@@ -636,21 +638,21 @@ function findingForm({ actionId, inheritHosts, existing, done, close }) {
 
   const fieldsEls = [
     field("What did you find?", textInput("title", "e.g. rundll32 spawned from wmiprvse",
-      existing ? existing.title : ""), true),
+      seed ? seed.title : ""), true),
     field("Type", typeSelect),
     field("Event time (in the incident)", textInput("event_time", "e.g. 2026-07-01 14:22",
-      existing ? existing.event_time : "")),
+      seed ? seed.event_time : "")),
     attrsGrid,
     field("Affected host(s)", picker.el, true),
     field("File hashes (optional)", hashGrid, true),
     field("Detail / evidence for this finding",
-      el("textarea", { name: "detail" }, existing ? existing.detail : ""), true),
+      el("textarea", { name: "detail" }, seed ? seed.detail : ""), true),
     shots ? field("Screenshot", shots.el, true) : null,
   ];
 
   const form = formCard({
     fields: fieldsEls,
-    submitLabel: existing ? "Save finding" : "Add finding",
+    submitLabel: existing ? "Save finding" : (template ? "Create clone" : "Add finding"),
     oncancel: close,
     onsubmit: async (data) => {
       const attrs = {};
@@ -677,7 +679,7 @@ function findingForm({ actionId, inheritHosts, existing, done, close }) {
         await refreshInfo();
         await done(existing.id);
       } else {
-        payload.action_id = actionId ?? null;
+        payload.action_id = actionId ?? (template ? template.action_id : null) ?? null;
         const res = await api("/api/findings", { method: "POST", body: payload });
         await uploadPending("finding", res.id, shots);
         await refreshInfo();
@@ -815,7 +817,7 @@ async function renderInvestigation(view) {
   const hasActions = tree.roots.length > 0;
   const collapseAll = el("button", { class: "btn small ghost" }, "Collapse all");
   collapseAll.addEventListener("click", () => {
-    state.collapsed = new Set(allActionIds(tree.roots));
+    state.collapsed = new Set(allActionKeys(tree.roots));
     render();
   });
   const expandAll = el("button", { class: "btn small ghost" }, "Expand all");
@@ -854,10 +856,12 @@ async function renderInvestigation(view) {
   }
 }
 
-function allActionIds(nodes, out = []) {
+// collapse state is keyed by node ref ("A8" / "F8") so actions and findings,
+// which share an integer id space, never collide.
+function allActionKeys(nodes, out = []) {
   for (const a of nodes) {
-    out.push(a.id);
-    for (const f of a.findings || []) allActionIds(f.actions || [], out);
+    out.push("A" + a.id);
+    for (const f of a.findings || []) allActionKeys(f.actions || [], out);
   }
   return out;
 }
@@ -867,11 +871,12 @@ function actionCard(a) {
   const evidence = state.info.evidence.find((e) => e.id === a.evidence_id);
 
   const manual = a.method === "manual";
-  const collapsed = state.collapsed.has(a.id);
+  const key = "A" + a.id;
+  const collapsed = state.collapsed.has(key);
   if (collapsed) card.classList.add("collapsed");
   const toggle = () => {
-    if (state.collapsed.has(a.id)) state.collapsed.delete(a.id);
-    else state.collapsed.add(a.id);
+    if (state.collapsed.has(key)) state.collapsed.delete(key);
+    else state.collapsed.add(key);
     render();
   };
   const caret = el("button", { class: "collapse-toggle",
@@ -966,24 +971,40 @@ function actionCard(a) {
 function findingCard(f) {
   const t = typeInfo(f.ftype);
   const card = el("div", { class: "card node-finding", id: `node-F${f.id}` });
+  const key = "F" + f.id;
+  const collapsed = state.collapsed.has(key);
+  if (collapsed) card.classList.add("collapsed");
+  const toggle = () => {
+    if (state.collapsed.has(key)) state.collapsed.delete(key);
+    else state.collapsed.add(key);
+    render();
+  };
+  const caret = el("button", { class: "collapse-toggle",
+    title: collapsed ? "expand finding" : "collapse finding" }, collapsed ? "▸" : "▾");
 
   const star = el("span", {
     class: "star" + (f.starred ? "" : " off"),
     title: "toggle key finding",
-    onclick: async () => {
+    onclick: async (ev) => {
+      ev.stopPropagation();
       await api(`/api/findings/${f.id}`, { method: "PATCH", body: { starred: f.starred ? 0 : 1 } });
       await reload(`node-F${f.id}`);
     },
   }, "★");
 
-  card.append(el("div", { class: "node-head" },
+  const nAct = (f.actions || []).length;
+  card.append(el("div", { class: "node-head clickable", onclick: toggle },
+    caret,
     el("span", { class: "ref f" }, `F${f.id}`),
     el("span", { class: "tag" }, t.label),
     star,
     el("span", { class: "node-title" }, f.title),
     f.host ? el("span", { class: "meta" }, `@${f.host}`) : null,
     f.stack ? hostCountChip(f) : null,
-    f.event_time ? el("span", { class: "meta" }, f.event_time) : null));
+    f.event_time ? el("span", { class: "meta" }, f.event_time) : null,
+    collapsed && nAct ? el("span", { class: "meta find-count" },
+      `${nAct} follow-up${nAct > 1 ? "s" : ""}`) : null));
+  if (collapsed) return card;
 
   const chips = Object.entries(f.attrs || {}).filter(([, v]) => v);
   if (chips.length) {
@@ -1011,7 +1032,12 @@ function findingCard(f) {
   const editBtn = el("button", { class: "btn small ghost" }, "Edit");
   editBtn.addEventListener("click", () => toggleForm(tools, (close) =>
     findingForm({ existing: f, done: (id) => reload(`node-F${id}`), close })));
-  tools.append(followBtn, editBtn,
+  const cloneBtn = el("button", { class: "btn small ghost",
+    title: "start a new finding pre-filled from this one" }, "Clone");
+  cloneBtn.addEventListener("click", () => toggleForm(tools, (close) =>
+    findingForm({ template: f, actionId: f.action_id,
+      done: (id) => reload(`node-F${id}`), close })));
+  tools.append(followBtn, editBtn, cloneBtn,
     shotButton("finding", f.id, "exhibit", () => reload(`node-F${f.id}`)));
   card.append(tools);
 
@@ -1040,7 +1066,8 @@ function hostCountChip(f) {
   const names = (f.affected_hosts || []).map((h) => h.name).join(", ");
   const chip = el("span", { class: "host-count-chip", title: names },
     `🖥 ${f.stack} host${f.stack > 1 ? "s" : ""}`);
-  chip.addEventListener("click", () => {
+  chip.addEventListener("click", (ev) => {
+    ev.stopPropagation();
     state.tab = "hosts";
     render();
   });

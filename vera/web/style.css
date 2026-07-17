@@ -176,7 +176,7 @@ label.field input:focus, label.field select:focus, label.field textarea:focus {
   align-self: center;
 }
 .collapse-toggle:hover { color: var(--accent); }
-.node-action.collapsed { padding-top: 8px; padding-bottom: 8px; }
+.node-action.collapsed, .node-finding.collapsed { padding-top: 8px; padding-bottom: 8px; }
 .collapsed-preview {
   font-family: var(--mono); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; max-width: 48ch;

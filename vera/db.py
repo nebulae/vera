@@ -715,7 +715,7 @@ class Case:
         """Fill a host-indicator's stackable name from its path when left blank,
         so `--path C:\\...\\evil.dll` alone yields artifact `evil.dll`."""
         attrs = dict(attrs or {})
-        if ftype == "hostindicator":
+        if ftype in ("hostindicator", "filesystem"):
             path = (attrs.get("path") or "").strip()
             if path and not (attrs.get("artifact") or "").strip():
                 attrs["artifact"] = types.basename(path)

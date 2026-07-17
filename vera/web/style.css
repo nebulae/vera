@@ -111,6 +111,11 @@ nav button.active {
 }
 .tab-menu-item:hover { background: var(--code-bg); color: var(--ink); }
 .tab-menu-item.active { color: var(--accent); font-weight: 600; }
+.tab-menu-head {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); font-weight: 700; padding: 7px 10px 3px;
+}
+.tab-menu-head:not(:first-child) { margin-top: 4px; border-top: 1px solid var(--line); }
 nav button .count {
   background: var(--code-bg);
   border-radius: 9px;

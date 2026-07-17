@@ -152,20 +152,34 @@ function tabList() {
 function spreadsheetTabs() {
   return (state.info.types || [])
     .filter((t) => t.view && t.key !== "lead")
-    .map((t) => ({ id: `type:${t.key}`, label: t.view }));
+    .map((t) => ({ id: `type:${t.key}`, label: t.view, group: t.group || "" }));
 }
 
 function selectTab(id) { state.tab = id; render(); }
 
 function spreadsheetDropdown(sheets) {
   const active = sheets.find((s) => s.id === state.tab);
+  const menuItem = (s) => el("button", {
+    class: "tab-menu-item" + (s.id === state.tab ? " active" : ""),
+    onclick: () => selectTab(s.id),
+  }, s.label);
+  // group the category views into Indicators vs Observations sections
+  const children = [];
+  const seen = new Set();
+  for (const [g, heading] of [["indicator", "Indicators"], ["observation", "Observations"]]) {
+    const items = sheets.filter((s) => s.group === g);
+    if (!items.length) continue;
+    children.push(el("div", { class: "tab-menu-head" }, heading));
+    for (const s of items) { seen.add(s.id); children.push(menuItem(s)); }
+  }
+  const rest = sheets.filter((s) => !seen.has(s.id));
+  if (rest.length) {
+    children.push(el("div", { class: "tab-menu-head" }, "Other"));
+    for (const s of rest) children.push(menuItem(s));
+  }
   const btn = el("button", { class: "tab-dropdown" + (active ? " active" : "") },
-    (active ? active.label : "Spreadsheet") + " ▾");
-  const menu = el("div", { class: "tab-menu" },
-    ...sheets.map((s) => el("button", {
-      class: "tab-menu-item" + (s.id === state.tab ? " active" : ""),
-      onclick: () => selectTab(s.id),
-    }, s.label)));
+    (active ? active.label : "Findings") + " ▾");
+  const menu = el("div", { class: "tab-menu" }, ...children);
   const wrap = el("div", { class: "tab-dropdown-wrap" }, btn, menu);
   btn.addEventListener("click", (e) => {
     e.stopPropagation();

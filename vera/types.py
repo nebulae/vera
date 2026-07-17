@@ -23,6 +23,7 @@ class FindingType:
     key: str
     label: str            # singular, e.g. "Compromised Account"
     view: str             # tab/category name, "" = no dedicated category view
+    group: str = ""       # "indicator" (an IOC) | "observation" (context) | ""
     fields: tuple[Field, ...] = ()
     csv_name: str = ""    # export file stem, "" = no per-type CSV
     csv_headers: tuple[str, ...] = ()
@@ -49,6 +50,7 @@ _register(FindingType(
     key="event",
     label="Timeline Event",
     view="",  # events surface in the Timeline view, shared by all types
+    group="observation",
     fields=(Field("activity", "Activity", "what happened"),),
 ))
 
@@ -56,6 +58,7 @@ _register(FindingType(
     key="host",
     label="Compromised Host",
     view="Compromised Hosts",
+    group="indicator",
     fields=(
         Field("ip", "IP Address"),
         Field("system_type", "System Type", "workstation / DC / server ..."),
@@ -72,6 +75,7 @@ _register(FindingType(
     key="account",
     label="Compromised Account",
     view="Compromised Accounts",
+    group="indicator",
     fields=(
         Field("account", "Account", "defaults to the finding title"),
         Field("account_type", "Account Type", "Admin, Domain Admin, User"),
@@ -90,6 +94,7 @@ _register(FindingType(
     key="malware",
     label="Malware / Tool",
     view="Malware & Tools",
+    group="indicator",
     fields=(
         Field("filename", "File Name", "defaults to the finding title"),
         Field("path", "Path"),
@@ -112,6 +117,7 @@ _register(FindingType(
     key="netindicator",
     label="Network Indicator",
     view="Network Indicators",
+    group="indicator",
     fields=(
         Field("address", "DNS / IP Address", "defaults to the finding title"),
         Field("source", "Source", "where the indicator was observed"),
@@ -128,6 +134,7 @@ _register(FindingType(
     key="hostindicator",
     label="Host-Based Indicator",
     view="Host Indicators",
+    group="indicator",
     fields=(
         # path first: paste the full location and the name auto-fills from it
         Field("path", "Full Path", r"full location, e.g. C:\Users\...\CRYPTBASE.dll"),
@@ -139,6 +146,27 @@ _register(FindingType(
     csv_row=lambda f: [_attrs(f).get("artifact_type", ""), f.get("event_time", ""),
                        _attrs(f).get("artifact") or f.get("title", ""),
                        _attrs(f).get("path", ""),
+                       f.get("host", "")],
+))
+
+# A file or directory an artifact touched — an OBSERVATION (scope/context), not
+# an indicator to correlate, so it's kept OUT of the Artifacts stack. Shares the
+# host-indicator attr keys, so a finding can be flipped between the two types
+# losslessly (just change its Type).
+_register(FindingType(
+    key="filesystem",
+    label="File / Directory",
+    view="Files & Directories",
+    group="observation",
+    fields=(
+        Field("path", "Full Path", r"full path, e.g. \VOLUME{...}\Windows\Update\evil.exe"),
+        Field("artifact", "Name", "file/folder name (auto-filled from the path)"),
+        Field("artifact_type", "Kind", "file / directory / executable"),
+    ),
+    csv_name="FilesAndDirectories",
+    csv_headers=("Kind", "Path", "Name", "Host"),
+    csv_row=lambda f: [_attrs(f).get("artifact_type", ""), _attrs(f).get("path", ""),
+                       _attrs(f).get("artifact") or f.get("title", ""),
                        f.get("host", "")],
 ))
 
@@ -156,6 +184,7 @@ _register(FindingType(
     key="note",
     label="Note",
     view="",
+    group="observation",
     fields=(),
 ))
 

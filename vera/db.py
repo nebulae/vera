@@ -574,6 +574,11 @@ class Case:
             host_ids = self.evidence_host_ids(evidence_id)
         if collection_id is not None:
             self._require("collections", collection_id, "C")
+        if exit_code is not None:
+            try:
+                exit_code = int(exit_code)
+            except (TypeError, ValueError):
+                raise CaseError("exit_code must be an integer") from None
         truncated = len(output) > OUTPUT_CAP
         digest = sha256_text(output) if output else ""
         default_tool = command.split()[0] if (method == "command" and command) else ""
@@ -693,15 +698,34 @@ class Case:
     # -- updates ------------------------------------------------------------
 
     ACTION_EDITABLE = {"host", "tool", "command", "method", "procedure", "notes",
-                       "output", "performed_at", "evidence_id", "collection_id",
-                       "parent_finding_id"}
+                       "output", "exit_code", "performed_at", "evidence_id",
+                       "collection_id", "parent_finding_id"}
     FINDING_EDITABLE = {"title", "detail", "ftype", "host", "event_time",
                         "attrs", "hashes", "starred", "action_id", "evidence_id"}
     EVIDENCE_EDITABLE = {"label", "kind", "source", "sha256", "notes",
                          "collection_id"}
 
     def update_action(self, action_id: int, **fields) -> None:
-        self._update("actions", self.ACTION_EDITABLE, action_id, fields, "A")
+        # validate against the public set FIRST so clients can never set the
+        # derived integrity columns (output_sha256/output_truncated) directly
+        bad = set(fields) - self.ACTION_EDITABLE
+        if bad:
+            raise CaseError(f"cannot edit field(s): {', '.join(sorted(bad))}")
+        if fields.get("exit_code") is not None:
+            try:
+                fields["exit_code"] = int(fields["exit_code"])
+            except (TypeError, ValueError):
+                raise CaseError("exit_code must be an integer") from None
+        allowed = self.ACTION_EDITABLE
+        if "output" in fields:
+            # editing the captured output re-derives its hash + truncation so
+            # the stored sha256 always matches the stored text
+            out = fields["output"] or ""
+            fields.update(output=out[:OUTPUT_CAP],
+                          output_sha256=sha256_text(out) if out else "",
+                          output_truncated=int(len(out) > OUTPUT_CAP))
+            allowed = allowed | {"output_sha256", "output_truncated"}
+        self._update("actions", allowed, action_id, fields, "A")
 
     def update_evidence(self, evidence_id: int, **fields) -> None:
         if fields.get("collection_id") is not None:

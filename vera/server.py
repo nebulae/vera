@@ -219,6 +219,7 @@ class Handler(BaseHTTPRequestHandler):
                     evidence_id=body.get("evidence_id"),
                     collection_id=body.get("collection_id"),
                     output=body.get("output", ""),
+                    exit_code=body.get("exit_code"),
                     notes=body.get("notes", ""),
                     parent_finding_id=body.get("parent_finding_id"),
                     host_ids=self._host_ids(case, body))

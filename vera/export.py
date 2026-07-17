@@ -69,6 +69,8 @@ def _export_csv(case: Case, out_dir: str, stem: str) -> list[str]:
     for ft in types.FINDING_TYPES.values():
         if not ft.csv_name:
             continue
+        if ft.key == "host":
+            continue  # merged with registry dispositions below
         rows = [ft.csv_row(f) for f in case.findings(ft.key)]
         sheet(ft.csv_name, ft.csv_headers, rows)
 
@@ -80,11 +82,33 @@ def _export_csv(case: Case, out_dir: str, stem: str) -> list[str]:
                 h["criticality"], ", ".join(h["aliases"]), h["finding_count"]]
                for h in hosts])
 
-    compromised = [h for h in hosts if h["status"] == "compromised"]
-    if compromised:
-        sheet("CompromisedHosts", ("Host", "IP", "OS", "System Type", "Findings"),
-              [[h["name"], h["ip"], h["os"], h["system_type"],
-                h["finding_count"]] for h in compromised])
+    # CompromisedHosts merges BOTH sources (same as the web view): host-type
+    # findings are the narrative rows, then any host flagged compromised on
+    # the registry without such a finding gets a derived row — its earliest
+    # compromise taken from the earliest-dated finding linked to it.
+    host_ft = types.FINDING_TYPES["host"]
+    host_findings = case.findings("host")
+    comp_rows = [host_ft.csv_row(f) for f in host_findings]
+    covered = {h["name"].lower() for f in host_findings
+               for h in f.get("affected_hosts", [])}
+    earliest: dict[str, str] = {}
+    for f in case.findings():
+        et = f.get("event_time", "")
+        if not et:
+            continue
+        for h in f.get("affected_hosts", []):
+            key = h["name"].lower()
+            if key not in earliest or et < earliest[key]:
+                earliest[key] = et
+    for h in hosts:
+        if h["status"] != "compromised" or h["name"].lower() in covered:
+            continue
+        comp_rows.append([earliest.get(h["name"].lower(), ""), h["name"],
+                          h["ip"], h["system_type"],
+                          "host registry disposition"
+                          f" ({h['finding_count']} linked findings)"])
+    if comp_rows:
+        sheet(host_ft.csv_name, host_ft.csv_headers, comp_rows)
 
     stack = case.stack_findings()
     if stack:

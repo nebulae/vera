@@ -1195,7 +1195,8 @@ class Case:
         return index
 
     def _enrich(self, findings) -> list:
-        """Attach affected_hosts + stack + a derived host string to findings."""
+        """Attach affected_hosts + stack + a derived host string to findings,
+        and, for leads, their triage worklist so it can be shown inline."""
         findings = list(findings)
         index = self._host_links("finding_hosts")
         for f in findings:
@@ -1206,6 +1207,11 @@ class Case:
             # registry is the single source of truth (fall back to legacy text).
             if hosts:
                 f["host"] = ", ".join(h["name"] for h in hosts)
+            if f.get("ftype") == "lead":
+                items = self.lead_items(f["id"])
+                f["items"] = items
+                f["item_total"] = len(items)
+                f["item_resolved"] = sum(1 for it in items if it["status"] != "open")
         return findings
 
     def stack_findings(self) -> list[dict]:
@@ -1276,15 +1282,9 @@ class Case:
         return status
 
     def leads(self) -> list[dict]:
-        """Lead findings (triage worklists) with their items + progress counts."""
-        rows = self._enrich([self._finding_dict(r) for r in self.conn.execute(
+        """Lead findings (triage worklists); _enrich attaches items + counts."""
+        return self._enrich([self._finding_dict(r) for r in self.conn.execute(
             "SELECT * FROM findings WHERE ftype = 'lead' ORDER BY id")])
-        for f in rows:
-            items = self.lead_items(f["id"])
-            f["items"] = items
-            f["item_total"] = len(items)
-            f["item_resolved"] = sum(1 for it in items if it["status"] != "open")
-        return rows
 
     def lead_items(self, lead_id: int) -> list[dict]:
         rows = self.conn.execute(

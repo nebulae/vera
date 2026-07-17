@@ -1141,6 +1141,9 @@ function findingCard(f) {
   const star = starToggle(f);
 
   const nAct = (f.actions || []).length;
+  const leadDone = isLead && f.item_total && f.item_resolved === f.item_total;
+  const leadProgress = isLead ? el("span", { class: "lead-progress" + (leadDone ? " done" : "") },
+    f.item_total ? `${f.item_resolved} of ${f.item_total} triaged` : "no items yet") : null;
   card.append(el("div", { class: "node-head clickable", onclick: toggle },
     caret,
     el("span", { class: `ref ${isLead ? "l" : "f"}` }, `F${f.id}`),
@@ -1151,6 +1154,7 @@ function findingCard(f) {
     el("span", { class: "spacer" }),
     collapsed && nAct ? el("span", { class: "meta find-count", title: "follow-up actions" },
       `↳ ${nAct}`) : null,
+    leadProgress,
     f.event_time ? el("span", { class: "meta node-time" }, f.event_time) : null));
   if (collapsed) return card;
 
@@ -1181,16 +1185,13 @@ function findingCard(f) {
       card.append(labeledBlock("Detail", f.detail));
     }
   }
+  // a lead's triage worklist lives right in the card, editable in place
+  if (isLead) card.append(leadWorklist(f));
 
   const strip = attachmentStrip(f.attachments, () => reload(`node-F${f.id}`));
   if (strip) card.append(strip);
 
   const tools = el("div", { class: "node-tools" });
-  if (isLead) {
-    const manageBtn = el("button", { class: "btn small" }, "Manage worklist →");
-    manageBtn.addEventListener("click", () => { state.tab = "type:lead"; render(); });
-    tools.append(manageBtn);
-  }
   const followBtn = el("button", { class: "btn small" }, "+ Follow-up action");
   followBtn.addEventListener("click", () => openFormModal(`Follow-up action from F${f.id}`, (close) =>
     actionForm({ parentFindingId: f.id, done: (id) => { close(); reload(`node-A${id}`); }, close })));
@@ -1684,15 +1685,22 @@ function leadCard(L) {
     card.append(el("details", { class: "output" },
       el("summary", {}, "worklist detail"), el("pre", {}, L.detail)));
   }
+  card.append(leadWorklist(L));
+  return card;
+}
+
+// the interactive worklist table (status / item / resolved-by / delete + an
+// add-item row) — shared by the Leads tab and the lead card in the tree
+function leadWorklist(L) {
+  const items = L.items || [];
   const table = el("table", { class: "lead-table" },
-    L.items.length ? el("thead", {}, el("tr", {},
+    items.length ? el("thead", {}, el("tr", {},
       el("th", { class: "lead-th-status" }, "Status"),
       el("th", {}, "Item"),
       el("th", {}, "Resolved by"),
       el("th", {}))) : null,
-    el("tbody", {}, ...L.items.map(leadItemTr), addItemTr(L.id)));
-  card.append(el("div", { class: "lead-scroll" }, table));
-  return card;
+    el("tbody", {}, ...items.map(leadItemTr), addItemTr(L.id)));
+  return el("div", { class: "lead-scroll" }, table);
 }
 
 function parseFindingRef(v) {

@@ -263,6 +263,28 @@ function toggleForm(anchor, build) {
   if (first) first.focus();
 }
 
+/* Open a build(close)->element in a centred modal dialog (Esc / backdrop / ✕
+   close). Used for all add/edit/clone CRUD so forms don't disrupt the tree. */
+function openFormModal(title, build) {
+  const overlay = el("div", { class: "lightbox" });
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const close = () => { overlay.remove(); document.removeEventListener("keydown", onKey); };
+  const body = el("div", { class: "modal-body" });
+  const panel = el("div", { class: "modal", onclick: (e) => e.stopPropagation() },
+    el("div", { class: "modal-head" },
+      el("h3", {}, title),
+      el("button", { class: "icon-x", title: "close (Esc)", onclick: close }, "✕")),
+    body);
+  overlay.addEventListener("click", close);
+  body.append(build(close));
+  document.addEventListener("keydown", onKey);
+  overlay.append(panel);
+  document.body.append(overlay);
+  const first = panel.querySelector("input, textarea, select");
+  if (first) setTimeout(() => first.focus(), 0);
+  return close;
+}
+
 /* ---------- attachments (screenshots) ---------- */
 
 function readFileAsB64(file) {
@@ -590,12 +612,48 @@ function hostPicker(initial, hint) {
 }
 
 /* one-line "N host(s): a, b, c +4 more" summary for read-only host notes */
+// a labelled free-text block so notes/detail read as a field, consistent
+// across action, finding and lead cards
+function labeledBlock(label, text) {
+  return el("div", { class: "labeled-block" },
+    el("div", { class: "block-label" }, label),
+    el("div", { class: "block-text" }, text));
+}
+
 function hostNames(hosts) {
   const names = (hosts || []).map((h) => h.name);
   if (!names.length) return "";
   const shown = names.slice(0, 10).join(", ");
   const more = names.length > 10 ? ` +${names.length - 10} more` : "";
   return `${names.length} host(s): ${shown}${more}`;
+}
+
+// One consistent host chip used on actions, findings and leads: the first few
+// names, then "(… and N more)", with the full list on hover; click → Hosts tab.
+function hostsInline(hosts, max = 5) {
+  const list = hosts || [];
+  if (!list.length) return null;
+  const names = list.map((h) => h.name);
+  const shown = names.slice(0, max).join(", ");
+  const extra = names.length - max;
+  const text = `🖥 ${shown}${extra > 0 ? ` (… and ${extra} more)` : ""}`;
+  return el("span", { class: "hosts-inline",
+    title: `${names.length} host${names.length > 1 ? "s" : ""}: ${names.join(", ")}`,
+    onclick: (ev) => { ev.stopPropagation(); state.tab = "hosts"; render(); } }, text);
+}
+
+// Clickable star used on every finding/lead card — toggles the "key finding"
+// flag inline (the one place that also works from the forms via a checkbox).
+function starToggle(f) {
+  return el("span", {
+    class: "star" + (f.starred ? "" : " off"),
+    title: f.starred ? "unstar — remove key-finding flag" : "star — mark as a key finding",
+    onclick: async (ev) => {
+      ev.stopPropagation();
+      await api(`/api/findings/${f.id}`, { method: "PATCH", body: { starred: f.starred ? 0 : 1 } });
+      await reload(`node-F${f.id}`);
+    },
+  }, "★");
 }
 
 /* ---------- finding form (shared: add + edit) ---------- */
@@ -648,6 +706,11 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
       return field(label, inp);
     }));
 
+  const starChk = el("input", { type: "checkbox", name: "starred" });
+  if (seed && seed.starred) starChk.checked = true;
+  const starField = el("label", { class: "field wide checkbox-field" },
+    starChk, el("span", {}, " ★ Key finding — flag as important"));
+
   const fieldsEls = [
     field("What did you find?", textInput("title", "e.g. rundll32 spawned from wmiprvse",
       seed ? seed.title : ""), true),
@@ -659,6 +722,7 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
     field("File hashes (optional)", hashGrid, true),
     field("Detail / evidence for this finding",
       el("textarea", { name: "detail" }, seed ? seed.detail : ""), true),
+    starField,
     shots ? field("Screenshot", shots.el, true) : null,
   ];
 
@@ -683,6 +747,7 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
         detail: data.get("detail").trim(),
         attrs,
         hashes,
+        starred: starChk.checked ? 1 : 0,
         host_ids: picker.ids(),
       };
       if (!payload.title) throw new Error("a title is required");
@@ -827,8 +892,8 @@ async function renderInvestigation(view) {
   view.replaceChildren();
 
   const addBtn = el("button", { class: "btn primary" }, "+ Log action");
-  addBtn.addEventListener("click", () => toggleForm(toolbar, (close) =>
-    actionForm({ done: (id) => reload(`node-A${id}`), close })));
+  addBtn.addEventListener("click", () => openFormModal("Log a step", (close) =>
+    actionForm({ done: (id) => { close(); reload(`node-A${id}`); }, close })));
   const hasActions = tree.roots.length > 0;
   const collapseAll = el("button", { class: "btn small ghost" }, "Collapse all");
   collapseAll.addEventListener("click", () => {
@@ -906,13 +971,6 @@ function actionCard(a) {
   };
   const caret = el("button", { class: "collapse-toggle",
     title: collapsed ? "expand action" : "collapse action" }, collapsed ? "▸" : "▾");
-  const nHosts = (a.hosts || []).length;
-  // collapsed: show a single host-count chip instead of the whole chip wall
-  const hostChips = collapsed
-    ? (nHosts ? [el("span", { class: "host-chip mini count" }, `🖥 ${nHosts}`)] : [])
-    : (a.hosts || []).map((h) =>
-        el("span", { class: "host-chip mini", title: "jump to host",
-          onclick: (ev) => { ev.stopPropagation(); state.tab = "hosts"; render(); } }, h.name));
   const nFind = countSubtreeFindings(a);   // rolls up the whole drill-down chain
   const evidenceTag = evidence ? el("span", { class: "evidence-tag",
     title: "jump to evidence",
@@ -924,7 +982,7 @@ function actionCard(a) {
     el("span", { class: "tag" }, a.tool || "action"),
     evidenceTag,
     manual ? el("span", { class: "tag method" }, "manual") : null,
-    ...hostChips,
+    hostsInline(a.hosts),
     el("span", { class: "meta" }, a.performed_at),
     a.exit_code !== null && a.exit_code !== undefined && a.exit_code !== 0
       ? el("span", { class: "meta", style: "color: var(--danger)" }, `exit ${a.exit_code}`) : null,
@@ -961,7 +1019,7 @@ function actionCard(a) {
       card.append(el("div", { class: "cmd" }, a.command));
     }
   }
-  if (a.notes) card.append(el("div", { class: "notes" }, a.notes));
+  if (a.notes) card.append(labeledBlock("Why / notes", a.notes));
 
   if (a.output) {
     const truncated = a.output_truncated ? " (truncated)" : "";
@@ -975,17 +1033,17 @@ function actionCard(a) {
 
   const tools = el("div", { class: "node-tools" });
   const addFindingBtn = el("button", { class: "btn small" }, "+ Finding");
-  addFindingBtn.addEventListener("click", () => toggleForm(tools, (close) =>
+  addFindingBtn.addEventListener("click", () => openFormModal(`Add a finding to A${a.id}`, (close) =>
     findingForm({ actionId: a.id, inheritHosts: a.hosts || [],
-      done: (id) => reload(`node-F${id}`), close })));
+      done: (id) => { close(); reload(`node-F${id}`); }, close })));
   const editBtn = el("button", { class: "btn small ghost" }, "Edit");
-  editBtn.addEventListener("click", () => toggleForm(tools, (close) =>
-    actionForm({ existing: a, done: (id) => reload(`node-A${id}`), close })));
+  editBtn.addEventListener("click", () => openFormModal(`Edit A${a.id}`, (close) =>
+    actionForm({ existing: a, done: (id) => { close(); reload(`node-A${id}`); }, close })));
   const cloneBtn = el("button", { class: "btn small ghost",
     title: "log a new step pre-filled from this one" }, "Clone");
-  cloneBtn.addEventListener("click", () => toggleForm(tools, (close) =>
+  cloneBtn.addEventListener("click", () => openFormModal(`Clone A${a.id}`, (close) =>
     actionForm({ template: a, parentFindingId: a.parent_finding_id,
-      done: (id) => reload(`node-A${id}`), close })));
+      done: (id) => { close(); reload(`node-A${id}`); }, close })));
   tools.append(addFindingBtn, editBtn, cloneBtn,
     shotButton("action", a.id, "exhibit", () => reload(`node-A${a.id}`)));
   card.append(tools);
@@ -1014,15 +1072,7 @@ function findingCard(f) {
   const caret = el("button", { class: "collapse-toggle",
     title: collapsed ? "expand finding" : "collapse finding" }, collapsed ? "▸" : "▾");
 
-  const star = el("span", {
-    class: "star" + (f.starred ? "" : " off"),
-    title: "toggle key finding",
-    onclick: async (ev) => {
-      ev.stopPropagation();
-      await api(`/api/findings/${f.id}`, { method: "PATCH", body: { starred: f.starred ? 0 : 1 } });
-      await reload(`node-F${f.id}`);
-    },
-  }, "★");
+  const star = starToggle(f);
 
   const nAct = (f.actions || []).length;
   card.append(el("div", { class: "node-head clickable", onclick: toggle },
@@ -1031,8 +1081,7 @@ function findingCard(f) {
     el("span", { class: `tag${isLead ? " lead" : ""}` }, t.label),
     star,
     el("span", { class: "node-title" }, f.title),
-    f.host ? el("span", { class: "meta" }, `@${f.host}`) : null,
-    f.stack ? hostCountChip(f) : null,
+    hostsInline(f.affected_hosts),
     f.event_time ? el("span", { class: "meta" }, f.event_time) : null,
     collapsed && nAct ? el("span", { class: "meta find-count" },
       `${nAct} follow-up${nAct > 1 ? "s" : ""}`) : null));
@@ -1062,7 +1111,7 @@ function findingCard(f) {
       card.append(el("details", { class: "output" },
         el("summary", {}, "worklist detail"), el("pre", {}, f.detail)));
     } else {
-      card.append(el("div", { class: "notes" }, f.detail));
+      card.append(labeledBlock("Detail", f.detail));
     }
   }
 
@@ -1076,16 +1125,16 @@ function findingCard(f) {
     tools.append(manageBtn);
   }
   const followBtn = el("button", { class: "btn small" }, "+ Follow-up action");
-  followBtn.addEventListener("click", () => toggleForm(tools, (close) =>
-    actionForm({ parentFindingId: f.id, done: (id) => reload(`node-A${id}`), close })));
+  followBtn.addEventListener("click", () => openFormModal(`Follow-up action from F${f.id}`, (close) =>
+    actionForm({ parentFindingId: f.id, done: (id) => { close(); reload(`node-A${id}`); }, close })));
   const editBtn = el("button", { class: "btn small ghost" }, "Edit");
-  editBtn.addEventListener("click", () => toggleForm(tools, (close) =>
-    findingForm({ existing: f, done: (id) => reload(`node-F${id}`), close })));
+  editBtn.addEventListener("click", () => openFormModal(`Edit F${f.id}`, (close) =>
+    findingForm({ existing: f, done: (id) => { close(); reload(`node-F${id}`); }, close })));
   const cloneBtn = el("button", { class: "btn small ghost",
     title: "start a new finding pre-filled from this one" }, "Clone");
-  cloneBtn.addEventListener("click", () => toggleForm(tools, (close) =>
+  cloneBtn.addEventListener("click", () => openFormModal(`Clone F${f.id}`, (close) =>
     findingForm({ template: f, actionId: f.action_id,
-      done: (id) => reload(`node-F${id}`), close })));
+      done: (id) => { close(); reload(`node-F${id}`); }, close })));
   tools.append(followBtn, editBtn, cloneBtn,
     shotButton("finding", f.id, "exhibit", () => reload(`node-F${f.id}`)));
   card.append(tools);
@@ -1109,18 +1158,6 @@ function refLink(refText, nodeId) {
       render();
     },
   }, refText);
-}
-
-function hostCountChip(f) {
-  const names = (f.affected_hosts || []).map((h) => h.name).join(", ");
-  const chip = el("span", { class: "host-count-chip", title: names },
-    `🖥 ${f.stack} host${f.stack > 1 ? "s" : ""}`);
-  chip.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    state.tab = "hosts";
-    render();
-  });
-  return chip;
 }
 
 /* ---------- stack view (cross-host, rare-first) ---------- */
@@ -1526,19 +1563,27 @@ async function renderLeads(view) {
     "Leads are triage worklists (e.g. an LFO autoruns sweep) — work through each "
     + "item and link it to the finding that resolved it. Leads stay out of the "
     + "Artifacts and cross-host Stack views."));
-  const titleI = el("input", { placeholder: "new lead, e.g. LFO autoruns across workstations",
-    autocomplete: "off", style: "min-width: 22rem" });
-  const addLead = async () => {
-    const t = titleI.value.trim();
-    if (!t) return;
-    await api("/api/findings", { method: "POST", body: { ftype: "lead", title: t } });
-    titleI.value = "";
-    await reload();
-  };
   const addBtn = el("button", { class: "btn primary" }, "+ New lead");
-  addBtn.addEventListener("click", addLead);
-  titleI.addEventListener("keydown", (e) => { if (e.key === "Enter") addLead(); });
-  view.append(el("div", { class: "toolbar" }, titleI, addBtn,
+  addBtn.addEventListener("click", () => openFormModal("New lead", (close) =>
+    formCard({
+      fields: [
+        field("Lead title", textInput("title", "LFO autoruns across workstations"), true),
+        field("Source (optional)", textInput("source", "where the worklist came from"), true),
+      ],
+      submitLabel: "Create lead",
+      oncancel: close,
+      onsubmit: async (data) => {
+        const t = data.get("title").trim();
+        if (!t) throw new Error("a title is required");
+        const source = data.get("source").trim();
+        await api("/api/findings", { method: "POST", body: {
+          ftype: "lead", title: t, ...(source ? { attrs: { source } } : {}),
+        }});
+        close();
+        await reload();
+      },
+    })));
+  view.append(el("div", { class: "toolbar" }, addBtn,
     el("span", { class: "hint" },
       "You can also set any finding's Type to “Lead” from the investigation tree.")));
   if (!leads.length) {
@@ -1559,9 +1604,9 @@ function leadCard(L) {
   const head = el("div", { class: "node-head" },
     el("span", { class: "ref l" }, `F${L.id}`),
     el("span", { class: "tag lead" }, "lead"),
-    L.starred ? el("span", { class: "star" }, "★") : null,
+    starToggle(L),
     el("span", { class: "node-title" }, L.title),
-    L.stack ? el("span", { class: "meta" }, `🖥 ${L.stack} hosts`) : null,
+    hostsInline(L.affected_hosts),
     el("span", { class: "lead-progress" + (done ? " done" : "") }, progress));
   const card = el("div", { class: "card node-lead lead-card", id: `node-F${L.id}` }, head);
   if ((L.attrs || {}).source) {
@@ -1785,7 +1830,7 @@ async function renderEvidence(view) {
     el("span", { class: "hint" },
       "A collection is a batch/sweep (e.g. an export from 40 hosts) with its " +
       "provenance and the hosts it covers. Evidence added to it inherits those hosts."));
-  colBtn.addEventListener("click", () => toggleForm(colBar, (close) => {
+  colBtn.addEventListener("click", () => openFormModal("Add a collection", (close) => {
     const picker = hostPicker([],
       "Hosts this collection covers — evidence in it inherits and follows these (per-host items keep their own).");
     return formCard({
@@ -1805,6 +1850,7 @@ async function renderEvidence(view) {
           name, tool: data.get("tool").trim(), operator: data.get("operator").trim(),
           scope: data.get("scope").trim(), host_ids: picker.ids(),
         }});
+        close();
         await reload();
       },
     });
@@ -1863,7 +1909,7 @@ async function renderEvidence(view) {
     el("span", { class: "hint" },
       "Register each evidence item (image, memory dump, triage collection) with its hash — " +
       "this is what makes the case reproducible."));
-  addBtn.addEventListener("click", () => toggleForm(toolbar, (close) => {
+  addBtn.addEventListener("click", () => openFormModal("Add evidence", (close) => {
     // hosts are editable here only for standalone evidence; inside a
     // collection they come from (and are edited on) the collection
     const picker = hostPicker([],
@@ -1912,6 +1958,7 @@ async function renderEvidence(view) {
           // in a collection the hosts derive from it (server side)
           ...(inCollection ? {} : { host_ids: picker.ids() }),
         }});
+        close();
         await reload();
       },
     });

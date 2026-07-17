@@ -162,12 +162,16 @@ original run.
 `vera serve` opens a local-only viewer (127.0.0.1) with:
 
 - **Investigation** — the action→finding→action tree; add actions/findings and
-  edit anything inline. Every action and finding **collapses in place** (click its
-  header, or Collapse all / Expand all) so a large case stays scannable. **Clone**
-  on any action or finding opens a new one pre-filled from it — a step keeps its
-  tool/command/evidence (output is a fresh capture); a finding keeps its type,
-  attrs, hashes, hosts, and detail — so you can enter a batch of similar entries
-  without re-typing. (`vera clone A6` / `vera clone F9` from the CLI too.)
+  edit anything. Add/edit/clone open in a **modal dialog** (Esc or click-away to
+  close) rather than shoving forms into the tree. Every action and finding
+  **collapses in place** (click its header, or Collapse all / Expand all) so a
+  large case stays scannable. **Clone** on any action or finding opens a new one
+  pre-filled from it — a step keeps its tool/command/evidence (output is a fresh
+  capture); a finding keeps its type, attrs, hashes, hosts, and detail — so you
+  can enter a batch of similar entries without re-typing. (`vera clone A6` /
+  `vera clone F9` from the CLI too.) Affected hosts show the same everywhere — a
+  chip with the first few names, "(… and N more)", full list on hover; the ★ on
+  any finding/lead toggles the key-finding flag (also a checkbox in the form).
 - **Timeline** — every finding with an event time, in incident order
 - **Stack** — cross-host findings, rarest first (least-frequency triage)
 - **Hosts** — an **inline-editable** registry grid: click any cell, tab between

@@ -218,8 +218,10 @@ label.field input:focus, label.field select:focus, label.field textarea:focus {
   white-space: nowrap;
 }
 .evidence-tag:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-.star { color: var(--star); cursor: pointer; user-select: none; }
-.star.off { opacity: 0.3; }
+.star { color: var(--star); cursor: pointer; user-select: none; transition: transform .1s, opacity .1s; }
+.star:hover { transform: scale(1.2); opacity: 1; }
+.star.off { opacity: 0.32; }
+.star.off:hover { opacity: 0.75; }
 .meta { color: var(--muted); font-size: 12px; }
 .node-title { font-weight: 600; }
 
@@ -251,6 +253,19 @@ details.output pre {
 
 .notes { font-size: 14px; margin: 6px 0; white-space: pre-wrap; }
 .notes.empty-note { color: var(--muted); font-style: italic; }
+
+/* labelled body block — makes free-text (notes / detail) read as a field,
+   not stray prose, and keeps action / finding / lead layouts consistent */
+.labeled-block { margin: 8px 0; }
+.block-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted); font-weight: 600; margin-bottom: 2px;
+}
+.block-text { font-size: 14px; white-space: pre-wrap; }
+
+.checkbox-field { display: flex; align-items: center; gap: 8px; cursor: pointer;
+  color: var(--ink); font-size: 14px; }
+.checkbox-field input { width: auto; margin: 0; }
 .attr-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .attr-chips span {
   font-size: 12px;
@@ -486,6 +501,25 @@ details.collapsible .proc-steps { margin-top: 6px; }
 }
 .lightbox figcaption { color: #eee; font-size: 13px; font-family: var(--mono); }
 
+/* modal dialog for CRUD forms */
+.modal {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  width: 680px; max-width: 94vw; max-height: 88vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+.modal-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 13px 18px; border-bottom: 1px solid var(--line);
+}
+.modal-head h3 { margin: 0; flex: 1; font-size: 16px; }
+.modal-body { padding: 4px 18px 16px; overflow-y: auto; }
+.modal-body form.card { border: none; background: none; padding: 0; margin: 6px 0 0; }
+.modal-body .form-actions {
+  position: sticky; bottom: 0; margin-top: 14px; padding: 12px 0 2px;
+  background: var(--panel); border-top: 1px solid var(--line);
+}
+
 /* ---- hosts, collections & cross-host stacking ---- */
 .host-count-chip {
   font-size: 12px;
@@ -497,6 +531,13 @@ details.collapsible .proc-steps { margin-top: 6px; }
   white-space: nowrap;
 }
 .host-count-chip:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); }
+.hosts-inline {
+  font-size: 12px; color: var(--accent); cursor: pointer;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 6px; padding: 1px 8px;
+  white-space: nowrap; max-width: 52ch; overflow: hidden; text-overflow: ellipsis;
+}
+.hosts-inline:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 
 .host-tags { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); }
 .host-tags-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }

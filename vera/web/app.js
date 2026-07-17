@@ -861,12 +861,31 @@ function actionCard(a) {
     a.exit_code !== null && a.exit_code !== undefined && a.exit_code !== 0
       ? el("span", { class: "meta", style: "color: var(--danger)" }, `exit ${a.exit_code}`) : null));
 
+  // The command / steps-to-reproduce body can be long (e.g. a multi-line
+  // hunt query); collapse it behind a compact summary when it is, so it does
+  // not dominate the card. Short single-line bodies stay inline.
+  const isLong = (t) => t && (t.includes("\n") || t.length > 100);
   if (manual) {
-    card.append(el("div", { class: "procedure" },
-      el("span", { class: "proc-tool" }, `🔧 ${a.tool}`),
-      a.procedure ? el("div", { class: "proc-steps" }, a.procedure) : null));
-  } else {
-    card.append(el("div", { class: "cmd" }, a.command));
+    const toolTag = el("span", { class: "proc-tool" }, `🔧 ${a.tool}`);
+    if (isLong(a.procedure)) {
+      card.append(el("details", { class: "procedure collapsible" },
+        el("summary", {}, toolTag,
+          el("span", { class: "collapse-hint" }, "steps to reproduce")),
+        el("div", { class: "proc-steps" }, a.procedure)));
+    } else {
+      card.append(el("div", { class: "procedure" }, toolTag,
+        a.procedure ? el("div", { class: "proc-steps" }, a.procedure) : null));
+    }
+  } else if (a.command) {
+    if (isLong(a.command)) {
+      const firstLine = a.command.split("\n")[0];
+      card.append(el("details", { class: "cmd-wrap collapsible" },
+        el("summary", {}, el("code", { class: "cmd-preview" }, firstLine),
+          el("span", { class: "collapse-hint" }, "command")),
+        el("div", { class: "cmd" }, a.command)));
+    } else {
+      card.append(el("div", { class: "cmd" }, a.command));
+    }
   }
   if (a.notes) card.append(el("div", { class: "notes" }, a.notes));
 

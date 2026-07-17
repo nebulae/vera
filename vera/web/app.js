@@ -240,17 +240,23 @@ async function reload(jumpTo = null) {
   await render();
 }
 
-// re-render while keeping a given node (e.g. a card being collapsed) pinned to
-// the same viewport position, so toggling collapse doesn't jump to the top
-async function renderKeepingInView(anchorId) {
+// run `fn` (a re-render), then nudge the scroll so `anchorId` stays put in the
+// viewport — used for in-place edits/toggles so the page doesn't jump to the top
+async function keepInView(anchorId, fn) {
   const before = document.getElementById(anchorId);
   const top = before ? before.getBoundingClientRect().top : null;
-  await render();
+  await fn();
   if (top !== null) {
     const after = document.getElementById(anchorId);
     if (after) window.scrollBy(0, after.getBoundingClientRect().top - top);
   }
 }
+
+const renderKeepingInView = (anchorId) => keepInView(anchorId, render);
+const reloadKeepingInView = (anchorId) => keepInView(anchorId, async () => {
+  await refreshInfo();
+  await render();
+});
 
 /* ---------- shared form machinery ---------- */
 
@@ -704,7 +710,7 @@ function starToggle(f) {
     onclick: async (ev) => {
       ev.stopPropagation();
       await api(`/api/findings/${f.id}`, { method: "PATCH", body: { starred: f.starred ? 0 : 1 } });
-      await reload(`node-F${f.id}`);
+      await reloadKeepingInView(`node-F${f.id}`);
     },
   }, f.starred ? "★" : "☆");
 }
@@ -1714,7 +1720,7 @@ function leadStatusSelect(it) {
       el("option", { value: s, selected: it.status === s ? "" : null }, s)));
   sel.addEventListener("change", async () => {
     await api(`/api/lead_items/${it.id}`, { method: "PATCH", body: { status: sel.value } });
-    await reload();
+    await reloadKeepingInView(`node-F${it.lead_id}`);
   });
   return sel;
 }
@@ -1726,7 +1732,7 @@ function leadLinkInput(it) {
     if (!fid) { inp.value = ""; return; }
     try {
       await api(`/api/lead_items/${it.id}`, { method: "PATCH", body: { finding_id: fid } });
-      await reload();
+      await reloadKeepingInView(`node-F${it.lead_id}`);
     } catch (e) { inp.value = ""; inp.placeholder = String(e.message || e); }
   };
   inp.addEventListener("keydown", (e) => { if (e.key === "Enter") commit(); });
@@ -1745,7 +1751,7 @@ function leadItemTr(it) {
   del.addEventListener("click", async () => {
     if (!confirm(`Remove worklist item “${it.label}”?`)) return;
     await api(`/api/lead_items/${it.id}`, { method: "DELETE" });
-    await reload();
+    await reloadKeepingInView(`node-F${it.lead_id}`);
   });
   return el("tr", { class: `lead-tr st-item-${it.status}` },
     el("td", { class: "lead-status-cell" }, leadStatusSelect(it)),
@@ -1765,7 +1771,7 @@ function addItemTr(leadId) {
     const fid = parseFindingRef(findRef.value);
     if (fid) body.finding_id = fid;
     await api(`/api/leads/${leadId}/items`, { method: "POST", body });
-    await reload();
+    await reloadKeepingInView(`node-F${leadId}`);
   };
   const btn = el("button", { class: "btn small" }, "Add");
   btn.addEventListener("click", add);

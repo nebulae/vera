@@ -249,20 +249,6 @@ function formCard({ fields, submitLabel, onsubmit, oncancel }) {
   return form;
 }
 
-/* Toggle helper: mounts a form right after `anchor`, focuses first input. */
-function toggleForm(anchor, build) {
-  if (anchor._form && anchor._form.isConnected) {
-    anchor._form.remove();
-    anchor._form = null;
-    return;
-  }
-  const form = build(() => { form.remove(); anchor._form = null; });
-  anchor._form = form;
-  anchor.after(form);
-  const first = form.querySelector("input, textarea, select");
-  if (first) first.focus();
-}
-
 /* Open a build(close)->element in a centred modal dialog (Esc / backdrop / ✕
    close). Used for all add/edit/clone CRUD so forms don't disrupt the tree. */
 function openFormModal(title, build) {
@@ -421,29 +407,27 @@ function openLightbox(at) {
 
 /* "📎 Screenshots" button on a card: stage several captioned views, then upload. */
 function shotButton(ownerType, ownerId, role, done) {
-  const tools = el("span", { class: "shot-add" });
   const btn = el("button", { class: "btn small ghost" }, "📎 Screenshots");
-  btn.addEventListener("click", () => toggleForm(tools, (close) => {
+  btn.addEventListener("click", () => openFormModal("Add screenshots", (close) => {
     const stager = shotStager(role);
     const err = el("div", { class: "form-error" });
-    const upload = el("button", { class: "btn small primary" }, "Upload");
+    const upload = el("button", { class: "btn primary" }, "Upload");
     upload.addEventListener("click", async () => {
       if (!stager.items.length) { err.textContent = "add at least one screenshot"; return; }
       upload.disabled = true; err.textContent = "";
       try {
         await uploadPending(ownerType, ownerId, stager);
+        close();
         await done();
       } catch (e) { err.textContent = String(e.message || e); upload.disabled = false; }
     });
-    const panel = el("div", { class: "card shot-panel" }, stager.el,
+    setTimeout(() => stager.el.querySelector(".dropzone")?.focus(), 0);
+    return el("div", {}, stager.el,
       el("div", { class: "form-actions" }, upload,
-        el("button", { class: "btn small", onclick: close }, "Cancel")),
+        el("button", { class: "btn", type: "button", onclick: close }, "Cancel")),
       err);
-    setTimeout(() => panel.querySelector(".dropzone")?.focus(), 0);
-    return panel;
   }));
-  tools.append(btn);
-  return tools;
+  return btn;
 }
 
 /* ---------- host picker (strict select from the registry) ---------- */

@@ -74,6 +74,17 @@ def _export_csv(case: Case, out_dir: str, stem: str) -> list[str]:
         rows = [ft.csv_row(f) for f in case.findings(ft.key)]
         sheet(ft.csv_name, ft.csv_headers, rows)
 
+    # the chain-of-custody sheet: every evidence item with who/when/how/hash
+    evidence = case.evidence()
+    if evidence:
+        sheet("Evidence", ("Ref", "Label", "Kind", "Hosts", "Source",
+                           "Acquired By", "Acquired At", "Acquisition Method",
+                           "SHA-256", "Registered"),
+              [[f"E{e['id']}", e["label"], e["kind"],
+                ", ".join(h["name"] for h in e.get("hosts", [])), e["source"],
+                e["acquired_by"], e["acquired_at"], e["acquisition"],
+                e["sha256"], e["created_at"]] for e in evidence])
+
     hosts = case.hosts()
     if hosts:
         sheet("Hosts", ("Host", "IP", "OS", "Status", "System Type",
@@ -245,13 +256,18 @@ def render_md(case: Case, linker=None) -> str:
     w("## Evidence")
     w("")
     if evidence:
-        w("| # | Label | Kind | Host(s) | Source | SHA-256 |")
-        w("|---|-------|------|---------|--------|---------|")
+        w("| # | Label | Kind | Host(s) | Source | Acquired | SHA-256 |")
+        w("|---|-------|------|---------|--------|----------|---------|")
         for e in evidence:
             hn = ", ".join(h["name"] for h in e.get("hosts", []))
             sha = f"`{e['sha256']}`" if e["sha256"] else ""
+            acq = " ".join(x for x in (
+                e["acquired_by"] and f"by {e['acquired_by']}",
+                e["acquired_at"] and f"at {e['acquired_at']}",
+                e["acquisition"] and f"via {e['acquisition']}") if x)
             w(f"| E{e['id']} | {_mdcell(e['label'])} | {_mdcell(e['kind'])} "
-              f"| {_mdcell(hn)} | {_mdcell(e['source'])} | {sha} |")
+              f"| {_mdcell(hn)} | {_mdcell(e['source'])} | {_mdcell(acq)} "
+              f"| {sha} |")
     else:
         w("_No evidence items recorded._")
     w("")

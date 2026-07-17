@@ -10,7 +10,7 @@ import sqlite3
 
 from . import types
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 OUTPUT_CAP = 256 * 1024        # chars of captured command output stored per action
 ATTACHMENT_CAP = 25 * 1024 * 1024  # max bytes per stored attachment
 
@@ -65,6 +65,9 @@ CREATE TABLE evidence (
     kind          TEXT NOT NULL DEFAULT '',
     source        TEXT NOT NULL DEFAULT '',
     sha256        TEXT NOT NULL DEFAULT '',
+    acquired_by   TEXT NOT NULL DEFAULT '',
+    acquired_at   TEXT NOT NULL DEFAULT '',
+    acquisition   TEXT NOT NULL DEFAULT '',
     notes         TEXT NOT NULL DEFAULT '',
     collection_id INTEGER REFERENCES collections(id),
     created_at    TEXT NOT NULL
@@ -371,10 +374,21 @@ def _migrate_v12(conn: sqlite3.Connection) -> None:
         "WHERE evidence_id IS NULL AND action_id IS NOT NULL")
 
 
+def _migrate_v13(conn: sqlite3.Connection) -> None:
+    """v12 -> v13: chain-of-custody fields on evidence — who acquired it,
+    when, and how (the acquisition method/tool)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(evidence)")}
+    for col in ("acquired_by", "acquired_at", "acquisition"):
+        if col not in cols:
+            conn.execute(
+                f"ALTER TABLE evidence ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+
+
 # Applied in ascending order to bring a case up to SCHEMA_VERSION.
 MIGRATIONS = {2: _migrate_v2, 3: _migrate_v3, 4: _migrate_v4, 5: _migrate_v5,
               6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8, 9: _migrate_v9,
-              10: _migrate_v10, 11: _migrate_v11, 12: _migrate_v12}
+              10: _migrate_v10, 11: _migrate_v11, 12: _migrate_v12,
+              13: _migrate_v13}
 
 
 class CaseError(Exception):
@@ -457,6 +471,8 @@ class Case:
         row = self.conn.execute(
             "SELECT value FROM case_meta WHERE key = 'schema_version'").fetchone()
         current = int(row["value"]) if row else 1
+        if current < SCHEMA_VERSION:
+            self._backup_before_migration(current)
         for version in sorted(MIGRATIONS):
             if current < version:
                 with self.conn:
@@ -466,6 +482,21 @@ class Case:
                         "('schema_version', ?) ON CONFLICT(key) DO UPDATE SET "
                         "value = excluded.value", (str(version),))
                 current = version
+
+    def _backup_before_migration(self, from_version: int) -> None:
+        """Copy the case file aside before a schema migration touches it, so a
+        buggy migration can never eat the only copy of an investigation. The
+        backup name records the schema it holds; an existing backup for the
+        same version is left alone (first one wins — it's the oldest state)."""
+        backup = f"{self.path}.pre-v{from_version}"
+        if not os.path.exists(self.path) or os.path.exists(backup):
+            return
+        dest = sqlite3.connect(backup)
+        try:
+            with dest:
+                self.conn.backup(dest)
+        finally:
+            dest.close()
 
     def close(self) -> None:
         self.conn.close()
@@ -495,7 +526,9 @@ class Case:
     def add_evidence(self, label: str, kind: str = "", source: str = "",
                      sha256: str = "", notes: str = "",
                      collection_id: int | None = None,
-                     host_ids: list[int] | None = None) -> int:
+                     host_ids: list[int] | None = None,
+                     acquired_by: str = "", acquired_at: str = "",
+                     acquisition: str = "") -> int:
         if collection_id is not None:
             self._require("collections", collection_id, "C")
             # evidence in a collection sources its hosts from the collection
@@ -504,9 +537,11 @@ class Case:
                 host_ids = self.collection_host_ids(collection_id)
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO evidence(label, kind, source, sha256, notes,"
-                " collection_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (label, kind, source, sha256, notes, collection_id, _now()))
+                "INSERT INTO evidence(label, kind, source, sha256, acquired_by,"
+                " acquired_at, acquisition, notes, collection_id, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (label, kind, source, sha256, acquired_by, acquired_at,
+                 acquisition, notes, collection_id, _now()))
             eid = cur.lastrowid
         if host_ids:
             self.set_evidence_hosts(eid, host_ids)
@@ -703,7 +738,8 @@ class Case:
     FINDING_EDITABLE = {"title", "detail", "ftype", "host", "event_time",
                         "attrs", "hashes", "starred", "action_id", "evidence_id"}
     EVIDENCE_EDITABLE = {"label", "kind", "source", "sha256", "notes",
-                         "collection_id"}
+                         "collection_id", "acquired_by", "acquired_at",
+                         "acquisition"}
 
     def update_action(self, action_id: int, **fields) -> None:
         # validate against the public set FIRST so clients can never set the

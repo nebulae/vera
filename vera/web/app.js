@@ -1918,12 +1918,38 @@ function addItemTr(leadId) {
 
 /* ---------- evidence ---------- */
 
+// Hash a local copy of the evidence in the browser (never uploaded) and drop
+// the sha256 into `input` — chain-of-custody verification without the CLI.
+function hashFileButton(input) {
+  const file = el("input", { type: "file", style: "display:none" });
+  const btn = el("button", { class: "btn small ghost", type: "button",
+    title: "compute the sha256 of a local copy — the file itself is not uploaded" },
+    "hash a file…");
+  btn.addEventListener("click", () => file.click());
+  file.addEventListener("change", async () => {
+    if (!file.files.length) return;
+    btn.textContent = "hashing…"; btn.disabled = true;
+    try {
+      const buf = await file.files[0].arrayBuffer();
+      const digest = await crypto.subtle.digest("SHA-256", buf);
+      input.value = [...new Uint8Array(digest)]
+        .map((b) => b.toString(16).padStart(2, "0")).join("");
+    } finally {
+      btn.textContent = "hash a file…"; btn.disabled = false; file.value = "";
+    }
+  });
+  return el("span", { class: "hash-file-btn" }, btn, file);
+}
+
 function openEvidenceEditor(e) {
   const f = (label, node) => el("label", { class: "field" }, label, node);
   const labelI = el("input", { value: e.label || "", autocomplete: "off" });
   const kindI = el("input", { value: e.kind || "", placeholder: "disk / memory / triage / logs" });
   const shaI = el("input", { class: "mono", value: e.sha256 || "", placeholder: "sha256", spellcheck: "false" });
   const sourceI = el("input", { value: e.source || "", placeholder: "acquisition detail / original path" });
+  const acqByI = el("input", { value: e.acquired_by || "", placeholder: "who collected it" });
+  const acqAtI = el("input", { value: e.acquired_at || "", placeholder: "YYYY-MM-DD HH:MM UTC" });
+  const acqHowI = el("input", { value: e.acquisition || "", placeholder: "KAPE triage / FTK Imager E01 / Velociraptor hunt" });
   const notesI = el("textarea", {}, e.notes || "");
   const collections = state.info.collections || [];
   const colSel = collections.length ? el("select", {},
@@ -1964,8 +1990,13 @@ function openEvidenceEditor(e) {
         el("label", { class: "field wide" }, "Label", labelI),
         f("Kind", kindI),
         colSel ? f("Collection", colSel) : null,
-        el("label", { class: "field wide" }, "SHA-256", shaI),
+        el("label", { class: "field wide" },
+          el("span", { class: "field-label-row" }, "SHA-256 ", hashFileButton(shaI)),
+          shaI),
         el("label", { class: "field wide" }, "Source", sourceI),
+        f("Acquired by", acqByI),
+        f("Acquired at (UTC)", acqAtI),
+        el("label", { class: "field wide" }, "Acquisition method", acqHowI),
         el("label", { class: "field wide" }, "Notes", notesI)),
       pickerWrap,
       colNote,
@@ -1979,6 +2010,9 @@ function openEvidenceEditor(e) {
             await api(`/api/evidence/${e.id}`, { method: "PATCH", body: {
               label, kind: kindI.value.trim(), sha256: shaI.value.trim(),
               source: sourceI.value.trim(), notes: notesI.value.trim(),
+              acquired_by: acqByI.value.trim(),
+              acquired_at: acqAtI.value.trim(),
+              acquisition: acqHowI.value.trim(),
               collection_id: cid,
               // standalone evidence: hosts come from the picker; in a
               // collection the server derives them when the link changes
@@ -2145,15 +2179,22 @@ async function renderEvidence(view) {
     };
     if (cSel) cSel.addEventListener("change", syncHosts);
     syncHosts();
+    const shaInput = textInput("sha256");
     return formCard({
       fields: [
         field("Label", textInput("label", "WS01 memory dump"), true),
         field("Kind", textInput("kind", "disk / memory / triage / logs")),
-        field("SHA-256", textInput("sha256")),
+        el("label", { class: "field" },
+          el("span", { class: "field-label-row" }, "SHA-256 ", hashFileButton(shaInput)),
+          shaInput),
         cSel ? field("Collection", cSel) : null,
         pickerField,
         noteField,
         field("Source / acquisition detail", textInput("source"), true),
+        field("Acquired by", textInput("acquired_by", "who collected it")),
+        field("Acquired at (UTC)", textInput("acquired_at", "YYYY-MM-DD HH:MM UTC")),
+        field("Acquisition method", textInput("acquisition",
+          "KAPE triage / FTK Imager E01 / Velociraptor hunt"), true),
         field("Notes", el("textarea", { name: "notes" }), true),
       ],
       submitLabel: "Add evidence",
@@ -2167,6 +2208,9 @@ async function renderEvidence(view) {
           kind: data.get("kind").trim(),
           sha256: data.get("sha256").trim(),
           source: data.get("source").trim(),
+          acquired_by: data.get("acquired_by").trim(),
+          acquired_at: data.get("acquired_at").trim(),
+          acquisition: data.get("acquisition").trim(),
           notes: data.get("notes").trim(),
           collection_id: inCollection ? Number(data.get("collection_id")) : null,
           // in a collection the hosts derive from it (server side)
@@ -2190,7 +2234,7 @@ async function renderEvidence(view) {
   }
   const table = el("table", {},
     el("thead", {}, el("tr", {},
-      ["Ref", "Label", "Kind", "Host(s)", "Source", "SHA-256", ""].map((h) => el("th", {}, h)))),
+      ["Ref", "Label", "Kind", "Host(s)", "Source", "Acquired", "SHA-256", ""].map((h) => el("th", {}, h)))),
     el("tbody", {}, items.map((e) => el("tr", {},
       el("td", { class: "mono" }, `E${e.id}`),
       el("td", {}, e.label),
@@ -2198,6 +2242,10 @@ async function renderEvidence(view) {
       el("td", {}, (e.hosts || []).map((h) =>
         el("span", { class: "host-chip mini" }, h.name))),
       el("td", { class: "mono" }, e.source),
+      el("td", { class: e.acquired_by || e.acquired_at ? "" : "cov-gap",
+        title: e.acquisition || "" },
+        [e.acquired_by, e.acquired_at].filter(Boolean).join(" · ")
+          || "⚠ no custody info"),
       el("td", { class: "mono" }, (e.sha256 || "").slice(0, 16)),
       el("td", {}, el("button", { class: "btn small ghost",
         onclick: () => openEvidenceEditor(e) }, "Edit"))))));

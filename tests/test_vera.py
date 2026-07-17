@@ -11,6 +11,14 @@ from vera.cli import main
 from vera.db import Case, CaseError
 
 
+@pytest.fixture(autouse=True)
+def _isolate_vera_config(tmp_path, monkeypatch):
+    """Redirect vera's active-case file and config dir into a temp dir for every
+    test, so no test can ever write the user's real ~/.config/vera/active."""
+    monkeypatch.setattr("vera.cli.ACTIVE_FILE", str(tmp_path / "_active"), raising=False)
+    monkeypatch.setattr("vera.cli.CONFIG_DIR", str(tmp_path), raising=False)
+
+
 @pytest.fixture
 def case(tmp_path):
     with Case(str(tmp_path / "t.vera"), create=True) as c:
@@ -1017,9 +1025,12 @@ def test_coverage(case):
 
 
 def test_cli_status_expand_coverage(tmp_path, monkeypatch, capsys):
+    # redirect the active-case file BEFORE init, or `vera init` writes the real
+    # ~/.config/vera/active and repoints the user's active case to a temp file
+    monkeypatch.setattr("vera.cli.ACTIVE_FILE", str(tmp_path / "active"))
+    monkeypatch.setattr("vera.cli.CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("VERA_CASE", str(tmp_path / "cli9.vera"))
     assert main(["init", str(tmp_path / "cli9.vera"), "--name", "t"]) == 0
-    monkeypatch.setattr("vera.cli.ACTIVE_FILE", str(tmp_path / "active"))
     assert main(["host", "add", "RD01", "RD02", "--status", "unknown"]) == 0
     assert main(["host", "edit", "RD01", "--status", "compromised"]) == 0
     capsys.readouterr()

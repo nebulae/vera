@@ -134,19 +134,52 @@ async function renderLanding() {
 }
 
 function tabList() {
-  const tabs = [
+  // the working views, in the order you move through a case
+  return [
     { id: "investigation", label: "Investigation" },
+    { id: "type:lead", label: "Leads" },
+    { id: "artifacts", label: "Artifacts" },
     { id: "timeline", label: "Timeline" },
     { id: "stack", label: "Stack" },
-    { id: "artifacts", label: "Artifacts" },
-    { id: "hosts", label: "Hosts" },
     { id: "coverage", label: "Coverage" },
+    { id: "hosts", label: "Hosts" },
+    { id: "evidence", label: "Evidence" },
   ];
-  for (const t of state.info.types) {
-    if (t.view) tabs.push({ id: `type:${t.key}`, label: t.view });
-  }
-  tabs.push({ id: "evidence", label: "Evidence" });
-  return tabs;
+}
+
+// the classic FOR508 category sheets — tucked into one dropdown (lead is
+// promoted to a top-level tab, so it's excluded here)
+function spreadsheetTabs() {
+  return (state.info.types || [])
+    .filter((t) => t.view && t.key !== "lead")
+    .map((t) => ({ id: `type:${t.key}`, label: t.view }));
+}
+
+function selectTab(id) { state.tab = id; render(); }
+
+function spreadsheetDropdown(sheets) {
+  const active = sheets.find((s) => s.id === state.tab);
+  const btn = el("button", { class: "tab-dropdown" + (active ? " active" : "") },
+    (active ? active.label : "Spreadsheet") + " ▾");
+  const menu = el("div", { class: "tab-menu" },
+    ...sheets.map((s) => el("button", {
+      class: "tab-menu-item" + (s.id === state.tab ? " active" : ""),
+      onclick: () => selectTab(s.id),
+    }, s.label)));
+  const wrap = el("div", { class: "tab-dropdown-wrap" }, btn, menu);
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = !wrap.classList.contains("open");
+    wrap.classList.toggle("open", open);
+    if (open) {
+      const r = btn.getBoundingClientRect();
+      menu.style.top = `${r.bottom + 3}px`;
+      menu.style.right = `${window.innerWidth - r.right}px`;
+      const closeOnce = () => { wrap.classList.remove("open"); document.removeEventListener("click", closeOnce); };
+      setTimeout(() => document.addEventListener("click", closeOnce), 0);
+    }
+  });
+  return wrap;
 }
 
 function buildTabs() {
@@ -155,9 +188,11 @@ function buildTabs() {
   for (const tab of tabList()) {
     nav.append(el("button", {
       class: tab.id === state.tab ? "active" : "",
-      onclick: () => { state.tab = tab.id; render(); },
+      onclick: () => selectTab(tab.id),
     }, tab.label));
   }
+  const sheets = spreadsheetTabs();
+  if (sheets.length) nav.append(spreadsheetDropdown(sheets));
 }
 
 function updateCounts() {

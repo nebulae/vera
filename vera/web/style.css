@@ -91,6 +91,26 @@ nav button.active {
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
+
+/* FOR508 category views as a dropdown */
+.tab-dropdown-wrap { position: relative; display: inline-flex; align-self: stretch; }
+/* fixed (not absolute) so the nav's overflow-x:auto can't clip it; positioned
+   from the button in JS */
+.tab-menu {
+  display: none; position: fixed; z-index: 60;
+  min-width: 190px; padding: 5px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.tab-dropdown-wrap.open .tab-menu { display: block; }
+.tab-menu-item {
+  display: block; width: 100%; text-align: left;
+  border: none; background: none; color: var(--muted);
+  font: inherit; font-size: 14px; padding: 7px 10px;
+  border-radius: 6px; cursor: pointer; white-space: nowrap;
+}
+.tab-menu-item:hover { background: var(--code-bg); color: var(--ink); }
+.tab-menu-item.active { color: var(--accent); font-weight: 600; }
 nav button .count {
   background: var(--code-bg);
   border-radius: 9px;

@@ -1571,3 +1571,22 @@ def test_api_finding_evidence(running_server):
     eid2 = json.loads(raw)["id"]
     status, _ = _req(port, "PATCH", f"/api/findings/{fid}", {"evidence_id": eid2})
     assert status == 200
+
+
+# ---- filesystem observations (excluded from Artifacts, flippable) ------
+
+def test_filesystem_observations_excluded_from_artifacts(case):
+    case.add_host("RD01")
+    a = case.add_action("enum")
+    fs = case.add_finding("dir", ftype="filesystem", action_id=a,
+                          attrs={"artifact_type": "directory",
+                                 "path": r"\VOLUME{x}\WINDOWS\UPDATE"})
+    assert case.get_finding(fs)["attrs"]["artifact"] == "UPDATE"   # name auto-derives
+    case.add_finding("dll", ftype="hostindicator", action_id=a,
+                     attrs={"path": r"c:\x\evil.dll"})
+    names = [g["name"] for g in case.artifact_stacks()]
+    assert "evil.dll" in names and "UPDATE" not in names          # fs stays out
+    # flipping the type is lossless and moves it in/out of the stack
+    case.update_finding(fs, ftype="hostindicator")
+    assert "UPDATE" in [g["name"] for g in case.artifact_stacks()]
+    assert case.get_finding(fs)["attrs"]["path"] == r"\VOLUME{x}\WINDOWS\UPDATE"

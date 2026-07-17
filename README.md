@@ -135,6 +135,16 @@ retyping a name.
   "N of M triaged"). Leads are deliberately kept **out of the Artifacts and
   cross-host Stack views** — only the concrete indicators you drill down to
   belong there.
+- **Indicators vs. Observations** — finding types are grouped into two kinds.
+  **Indicators** are IOCs you correlate (Host/Network Indicators, Malware & Tools,
+  Compromised Hosts/Accounts); **Observations** are context/scope you record but
+  don't correlate (**File / Directory**, notes, timeline events). Only indicators
+  feed the Artifacts stack. The two groups are labelled in the "Findings" menu.
+- **File / Directory** (a finding type) — a file or folder an artifact touched,
+  recorded for **scope**, not correlation (e.g. the contents of a malware staging
+  directory). It's deliberately kept **out of the Artifacts stack**; flip a
+  finding between this and **Host Indicator** just by changing its Type (they
+  share fields, so it's lossless).
 - **Artifacts** — `vera artifacts` (and the web **Artifacts** tab) stacks
   host-based indicators by artifact **name regardless of path**: the same planted
   DLL name seen in several app directories across hosts collapses into one entry

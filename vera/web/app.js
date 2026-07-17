@@ -257,19 +257,19 @@ function formCard({ fields, submitLabel, onsubmit, oncancel }) {
   return form;
 }
 
-/* Open a build(close)->element in a centred modal dialog (Esc / backdrop / ✕
-   close). Used for all add/edit/clone CRUD so forms don't disrupt the tree. */
+/* Open a build(close)->element in a centred modal dialog. Closes only on the ✕,
+   Save, or Cancel (and Esc) — NOT on a backdrop click, so it can't be dismissed
+   by accident. Used for all add/edit/clone CRUD so forms don't disrupt the tree. */
 function openFormModal(title, build) {
   const overlay = el("div", { class: "lightbox" });
   const onKey = (e) => { if (e.key === "Escape") close(); };
   const close = () => { overlay.remove(); document.removeEventListener("keydown", onKey); };
   const body = el("div", { class: "modal-body" });
-  const panel = el("div", { class: "modal", onclick: (e) => e.stopPropagation() },
+  const panel = el("div", { class: "modal" },
     el("div", { class: "modal-head" },
       el("h3", {}, title),
       el("button", { class: "icon-x", title: "close (Esc)", onclick: close }, "✕")),
     body);
-  overlay.addEventListener("click", close);
   body.append(build(close));
   document.addEventListener("keydown", onKey);
   overlay.append(panel);
@@ -703,8 +703,7 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
   // a new finding inherits the host(s) of the action it hangs off — you can adjust
   const initialHosts = seed ? seed.affected_hosts : (inheritHosts || []);
   const picker = hostPicker(initialHosts,
-    "Affected host(s) — inherited from the action; adjust if the finding spans "
-    + "more or fewer systems. Picking 2+ stacks it across hosts.");
+    "inherited from the step — adjust if it spans more or fewer hosts; 2+ = cross-host");
 
   // hashes: md5 / sha1 / sha256 of the file this finding is about
   const HASHES = [["md5", "MD5", 32], ["sha1", "SHA-1", 40], ["sha256", "SHA-256", 64]];
@@ -719,14 +718,26 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
       return field(label, inp);
     }));
 
-  const starChk = el("input", { type: "checkbox", name: "starred" });
-  if (seed && seed.starred) starChk.checked = true;
-  const starField = el("label", { class: "field wide checkbox-field" },
-    starChk, el("span", {}, " ★ Key finding — flag as important"));
+  // key-finding star lives right beside the title — a real clickable star, not
+  // a second-class checkbox
+  let starred = !!(seed && seed.starred);
+  const starBtn = el("span", { class: "form-star" + (starred ? "" : " off"),
+    role: "button", tabindex: "0" }, "★");
+  const syncStar = () => {
+    starBtn.classList.toggle("off", !starred);
+    starBtn.title = starred ? "Key finding — click to unflag" : "Flag as a key finding";
+  };
+  const toggleStar = (ev) => { ev.preventDefault(); ev.stopPropagation(); starred = !starred; syncStar(); };
+  starBtn.addEventListener("click", toggleStar);
+  starBtn.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") toggleStar(e); });
+  syncStar();
+  const titleField = el("label", { class: "field wide" },
+    el("span", { class: "field-label-row" },
+      el("span", {}, "What did you find?"), starBtn),
+    textInput("title", "e.g. rundll32 spawned from wmiprvse", seed ? seed.title : ""));
 
   const fieldsEls = [
-    field("What did you find?", textInput("title", "e.g. rundll32 spawned from wmiprvse",
-      seed ? seed.title : ""), true),
+    titleField,
     field("Type", typeSelect),
     field("Event time (in the incident)", textInput("event_time", "e.g. 2026-07-01 14:22",
       seed ? seed.event_time : "")),
@@ -735,7 +746,6 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
     field("File hashes (optional)", hashGrid, true),
     field("Detail / evidence for this finding",
       el("textarea", { name: "detail" }, seed ? seed.detail : ""), true),
-    starField,
     shots ? field("Screenshot", shots.el, true) : null,
   ];
 
@@ -760,7 +770,7 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
         detail: data.get("detail").trim(),
         attrs,
         hashes,
-        starred: starChk.checked ? 1 : 0,
+        starred: starred ? 1 : 0,
         host_ids: picker.ids(),
       };
       if (!payload.title) throw new Error("a title is required");
@@ -1759,7 +1769,7 @@ function openEvidenceEditor(e) {
   if (colSel) colSel.addEventListener("change", syncHosts);
   const err = el("div", { class: "form-error" });
 
-  const overlay = el("div", { class: "lightbox", onclick: () => overlay.remove() },
+  const overlay = el("div", { class: "lightbox" },
     el("div", { class: "host-panel", onclick: (ev) => ev.stopPropagation() },
       el("h3", {}, `Edit E${e.id}`),
       el("div", { class: "form-grid" },
@@ -1806,7 +1816,7 @@ function openCollectionEditor(c) {
   const picker = hostPicker(c.hosts || [],
     "Hosts this collection covers — evidence in it inherits and follows these (per-host items keep their own).");
   const err = el("div", { class: "form-error" });
-  const overlay = el("div", { class: "lightbox", onclick: () => overlay.remove() },
+  const overlay = el("div", { class: "lightbox" },
     el("div", { class: "host-panel", onclick: (ev) => ev.stopPropagation() },
       el("h3", {}, `Edit C${c.id}`),
       el("div", { class: "form-grid" },

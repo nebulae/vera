@@ -284,6 +284,17 @@ details.output pre {
 .checkbox-field { display: flex; align-items: center; gap: 8px; cursor: pointer;
   color: var(--ink); font-size: 14px; }
 .checkbox-field input { width: auto; margin: 0; }
+
+/* clickable key-finding star next to the title label in the finding form */
+.field-label-row { display: flex; align-items: center; gap: 8px; }
+.form-star {
+  color: var(--star); cursor: pointer; user-select: none; font-size: 16px;
+  line-height: 1; transition: transform .1s, opacity .1s;
+}
+.form-star:hover { transform: scale(1.2); opacity: 1; }
+.form-star.off { opacity: 0.32; }
+.form-star.off:hover { opacity: 0.7; }
+.form-star:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 .attr-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .attr-chips span {
   font-size: 12px;
@@ -530,12 +541,25 @@ details.collapsible .proc-steps { margin-top: 6px; }
   display: flex; align-items: center; gap: 12px;
   padding: 13px 18px; border-bottom: 1px solid var(--line);
 }
+.modal-head { flex: none; }
 .modal-head h3 { margin: 0; flex: 1; font-size: 16px; }
-.modal-body { padding: 4px 18px 16px; overflow-y: auto; }
-.modal-body form.card { border: none; background: none; padding: 0; margin: 6px 0 0; }
+/* body holds the form and does not itself scroll; the fields region scrolls and
+   the action buttons stay pinned as a footer, so content never slides behind them */
+.modal-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+.modal-body > form.card,
+.modal-body > div {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+  border: none; background: none; margin: 0; padding: 0;
+}
+.modal-body form.card > .form-grid {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; margin: 0; padding: 12px 18px 6px;
+}
+.modal-body > div > .shot-stage,
+.modal-body > div > div:first-child { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px 18px 6px; }
+.modal-body .form-error { flex: none; padding: 2px 18px; }
 .modal-body .form-actions {
-  position: sticky; bottom: 0; margin-top: 14px; padding: 12px 0 2px;
-  background: var(--panel); border-top: 1px solid var(--line);
+  flex: none; margin: 0; padding: 12px 18px;
+  border-top: 1px solid var(--line); background: var(--panel);
 }
 
 /* ---- hosts, collections & cross-host stacking ---- */
@@ -559,6 +583,7 @@ details.collapsible .proc-steps { margin-top: 6px; }
 
 .host-tags { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); }
 .host-tags-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.host-tags-head .hint { font-size: 11px; opacity: 0.8; line-height: 1.3; }
 .host-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
 .host-chip {
   display: inline-flex;
@@ -637,12 +662,15 @@ details.collapsible .proc-steps { margin-top: 6px; }
 .seg-chip.on .seg-n { color: var(--accent); }
 
 .host-checklist {
-  max-height: 240px;
+  max-height: 320px;
   overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--panel);
 }
+/* inside a modal the dialog body already scrolls — don't nest a second
+   scrollbar; let the checklist grow and the modal handle scrolling */
+.modal .host-checklist, .host-panel .host-checklist { max-height: none; overflow-y: visible; }
 .host-opt {
   display: grid;
   grid-template-columns: 18px 90px 110px 1fr;

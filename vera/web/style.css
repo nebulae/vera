@@ -748,3 +748,31 @@ tr.cov-gap td { background: color-mix(in srgb, #d97706 10%, transparent); }
 table.art-members { margin-top: 4px; }
 .path-list { display: flex; flex-direction: column; gap: 2px; }
 .path-list code { white-space: nowrap; }
+
+/* ---------- leads: triage worklists ---------- */
+.lead-progress {
+  margin-left: auto; font-size: 12px; font-weight: 600; color: var(--finding);
+  background: color-mix(in srgb, var(--finding) 12%, transparent);
+  border-radius: 6px; padding: 1px 8px;
+}
+.lead-progress.done { color: #16a34a;
+  background: color-mix(in srgb, #16a34a 14%, transparent); }
+.lead-items { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.lead-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line);
+}
+.lead-item .lead-label { font-family: var(--mono); font-size: 13px; }
+.lead-item .lead-finding { margin-left: 4px; }
+.lead-item .chip-x { margin-left: auto; }
+.lead-status { flex: none; width: 6.5rem; }
+.lead-link-input { width: 9rem; font-family: var(--mono); font-size: 12px; }
+.lead-item.st-item-open { border-left: 3px solid var(--star); }
+.lead-item.st-item-triaged {
+  border-left: 3px solid #16a34a;
+  background: color-mix(in srgb, #16a34a 6%, transparent);
+}
+.lead-item.st-item-dismissed { opacity: 0.6; }
+.lead-item.st-item-dismissed .lead-label { text-decoration: line-through; }
+.lead-add { border-style: dashed; }
+.lead-add .lead-add-label { flex: 1; min-width: 12rem; }

@@ -1353,6 +1353,7 @@ function categoryTable(t, rows) {
 async function renderCategory(view, typeKey) {
   const t = typeInfo(typeKey);
   if (typeKey === "hostindicator") return renderHostIndicators(view, t);
+  if (typeKey === "lead") return renderLeads(view);
   const rows = await api(`/api/findings?type=${encodeURIComponent(typeKey)}`);
   if (!rows.length) {
     emptyState(view, `No ${t.view.toLowerCase()} recorded yet`,
@@ -1437,6 +1438,130 @@ async function renderArtifacts(view) {
       el("td", {}, el("div", { class: "path-list" },
         (g.paths.length ? g.paths : ["—"]).map((p) => el("code", { class: "mono" }, p))))))));
   view.append(el("div", { class: "table-wrap" }, table));
+}
+
+/* ---------- leads (triage worklists) ---------- */
+
+const LEAD_STATUSES = ["open", "triaged", "dismissed"];
+
+async function renderLeads(view) {
+  const leads = await api("/api/leads");
+  view.replaceChildren(el("p", { class: "hint" },
+    "Leads are triage worklists (e.g. an LFO autoruns sweep) — work through each "
+    + "item and link it to the finding that resolved it. Leads stay out of the "
+    + "Artifacts and cross-host Stack views."));
+  const titleI = el("input", { placeholder: "new lead, e.g. LFO autoruns across workstations",
+    autocomplete: "off", style: "min-width: 22rem" });
+  const addLead = async () => {
+    const t = titleI.value.trim();
+    if (!t) return;
+    await api("/api/findings", { method: "POST", body: { ftype: "lead", title: t } });
+    titleI.value = "";
+    await reload();
+  };
+  const addBtn = el("button", { class: "btn primary" }, "+ New lead");
+  addBtn.addEventListener("click", addLead);
+  titleI.addEventListener("keydown", (e) => { if (e.key === "Enter") addLead(); });
+  view.append(el("div", { class: "toolbar" }, titleI, addBtn,
+    el("span", { class: "hint" },
+      "You can also set any finding's Type to “Lead” from the investigation tree.")));
+  if (!leads.length) {
+    view.append(el("div", { class: "empty" },
+      el("p", { class: "empty-title" }, "No leads yet"),
+      el("p", { class: "empty-hint" },
+        "Create a lead for a worklist you need to triage, then add its items.")));
+    return;
+  }
+  for (const L of leads) view.append(leadCard(L));
+}
+
+function leadCard(L) {
+  const progress = L.item_total
+    ? `${L.item_resolved} of ${L.item_total} triaged`
+    : "no items yet";
+  const done = L.item_total && L.item_resolved === L.item_total;
+  const head = el("div", { class: "node-head" },
+    el("span", { class: "ref f" }, `F${L.id}`),
+    el("span", { class: "tag" }, "lead"),
+    L.starred ? el("span", { class: "star" }, "★") : null,
+    el("span", { class: "node-title" }, L.title),
+    L.stack ? el("span", { class: "meta" }, `🖥 ${L.stack} hosts`) : null,
+    el("span", { class: "lead-progress" + (done ? " done" : "") }, progress));
+  const card = el("div", { class: "card node-finding lead-card", id: `node-F${L.id}` }, head);
+  if ((L.attrs || {}).source) {
+    card.append(el("div", { class: "attr-chips" },
+      el("span", {}, el("b", {}, "source: "), L.attrs.source)));
+  }
+  if (L.detail) {
+    card.append(el("details", { class: "output" },
+      el("summary", {}, "worklist detail"), el("pre", {}, L.detail)));
+  }
+  const items = el("div", { class: "lead-items" });
+  for (const it of L.items) items.append(leadItemRow(it));
+  items.append(addItemRow(L.id));
+  card.append(items);
+  return card;
+}
+
+function parseFindingRef(v) {
+  const n = Number(String(v).trim().replace(/^F/i, ""));
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function leadItemRow(it) {
+  const sel = el("select", { class: "cell-select lead-status" },
+    LEAD_STATUSES.map((s) =>
+      el("option", { value: s, selected: it.status === s ? "" : null }, s)));
+  sel.addEventListener("change", async () => {
+    await api(`/api/lead_items/${it.id}`, { method: "PATCH", body: { status: sel.value } });
+    await reload();
+  });
+  let linkCell;
+  if (it.finding) {
+    linkCell = el("span", { class: "lead-finding" },
+      refLink(`F${it.finding.id}`, `node-F${it.finding.id}`), " ",
+      el("span", { class: "meta" }, (it.finding.starred ? "★ " : "") + it.finding.title));
+  } else {
+    const inp = el("input", { class: "lead-link-input", placeholder: "→ link F#" });
+    const commit = async () => {
+      const fid = parseFindingRef(inp.value);
+      if (!fid) { inp.value = ""; return; }
+      try {
+        await api(`/api/lead_items/${it.id}`, { method: "PATCH", body: { finding_id: fid } });
+        await reload();
+      } catch (e) { inp.value = ""; inp.placeholder = String(e.message || e); }
+    };
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") commit(); });
+    inp.addEventListener("blur", commit);
+    linkCell = inp;
+  }
+  const del = el("button", { class: "chip-x", title: "remove item" }, "✕");
+  del.addEventListener("click", async () => {
+    if (!confirm(`Remove worklist item “${it.label}”?`)) return;
+    await api(`/api/lead_items/${it.id}`, { method: "DELETE" });
+    await reload();
+  });
+  return el("div", { class: `lead-item st-item-${it.status}` },
+    sel, el("span", { class: "lead-label" }, it.label), linkCell, del);
+}
+
+function addItemRow(leadId) {
+  const label = el("input", { class: "lead-add-label",
+    placeholder: "add worklist item (e.g. stun.exe)", autocomplete: "off" });
+  const findRef = el("input", { class: "lead-link-input", placeholder: "→ F# (optional)" });
+  const add = async () => {
+    const l = label.value.trim();
+    if (!l) return;
+    const body = { label: l };
+    const fid = parseFindingRef(findRef.value);
+    if (fid) body.finding_id = fid;
+    await api(`/api/leads/${leadId}/items`, { method: "POST", body });
+    await reload();
+  };
+  const btn = el("button", { class: "btn small" }, "Add");
+  btn.addEventListener("click", add);
+  label.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
+  return el("div", { class: "lead-item lead-add" }, label, findRef, btn);
 }
 
 /* ---------- evidence ---------- */

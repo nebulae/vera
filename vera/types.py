@@ -142,6 +142,16 @@ _register(FindingType(
 ))
 
 _register(FindingType(
+    key="lead",
+    label="Lead",
+    view="Leads",
+    # a lead is a triage worklist (e.g. an LFO autoruns sweep), not an
+    # indicator: it carries `lead_items` you work through, and is deliberately
+    # excluded from the Artifacts and cross-host Stack views.
+    fields=(Field("source", "Source", "where the worklist came from"),),
+))
+
+_register(FindingType(
     key="note",
     label="Note",
     view="",

@@ -10,7 +10,7 @@ import sqlite3
 
 from . import types
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 OUTPUT_CAP = 256 * 1024        # chars of captured command output stored per action
 ATTACHMENT_CAP = 25 * 1024 * 1024  # max bytes per stored attachment
 
@@ -133,6 +133,17 @@ CREATE TABLE collection_hosts (
     host_id       INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
     PRIMARY KEY (collection_id, host_id)
 );
+CREATE TABLE lead_items (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    lead_id    INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    label      TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'open',      -- open | triaged | dismissed
+    finding_id INTEGER REFERENCES findings(id),   -- the finding that resolved it
+    note       TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    deleted_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_leaditems_lead  ON lead_items(lead_id);
 CREATE INDEX idx_findings_action ON findings(action_id);
 CREATE INDEX idx_findings_ftype  ON findings(ftype);
 CREATE INDEX idx_actions_parent  ON actions(parent_finding_id);
@@ -329,10 +340,27 @@ def _migrate_v10(conn: sqlite3.Connection) -> None:
                          (json.dumps(attrs), r[0]))
 
 
+def _migrate_v11(conn: sqlite3.Connection) -> None:
+    """v10 -> v11: leads carry a triage worklist (`lead_items`)."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS lead_items (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id    INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+            label      TEXT NOT NULL,
+            status     TEXT NOT NULL DEFAULT 'open',
+            finding_id INTEGER REFERENCES findings(id),
+            note       TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            deleted_at TEXT NOT NULL DEFAULT ''
+        )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_leaditems_lead "
+                 "ON lead_items(lead_id)")
+
+
 # Applied in ascending order to bring a case up to SCHEMA_VERSION.
 MIGRATIONS = {2: _migrate_v2, 3: _migrate_v3, 4: _migrate_v4, 5: _migrate_v5,
               6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8, 9: _migrate_v9,
-              10: _migrate_v10}
+              10: _migrate_v10, 11: _migrate_v11}
 
 
 class CaseError(Exception):
@@ -1148,6 +1176,7 @@ class Case:
             FROM findings f
             JOIN finding_hosts fh ON fh.finding_id = f.id
             JOIN hosts h ON h.id = fh.host_id AND h.deleted_at = ''
+            WHERE f.ftype != 'lead'
             GROUP BY f.id ORDER BY stack ASC, f.id ASC""")
         return self._enrich([self._finding_dict(r) for r in rows])
 
@@ -1189,6 +1218,85 @@ class Case:
             out.append(g)
         out.sort(key=lambda g: (-g["count"], -g["host_count"], g["name"].lower()))
         return out
+
+    # -- leads (triage worklists) ------------------------------------------
+
+    LEAD_ITEM_STATUSES = ("open", "triaged", "dismissed")
+    LEAD_ITEM_EDITABLE = {"label", "status", "finding_id", "note"}
+
+    @staticmethod
+    def _check_lead_status(status: str) -> str:
+        status = (status or "").strip().lower()
+        if status not in Case.LEAD_ITEM_STATUSES:
+            raise CaseError(f"bad lead item status {status!r} "
+                            f"(one of: {', '.join(Case.LEAD_ITEM_STATUSES)})")
+        return status
+
+    def leads(self) -> list[dict]:
+        """Lead findings (triage worklists) with their items + progress counts."""
+        rows = self._enrich([self._finding_dict(r) for r in self.conn.execute(
+            "SELECT * FROM findings WHERE ftype = 'lead' ORDER BY id")])
+        for f in rows:
+            items = self.lead_items(f["id"])
+            f["items"] = items
+            f["item_total"] = len(items)
+            f["item_resolved"] = sum(1 for it in items if it["status"] != "open")
+        return rows
+
+    def lead_items(self, lead_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM lead_items WHERE lead_id = ? AND deleted_at = '' "
+            "ORDER BY id", (lead_id,))
+        out = []
+        for r in rows:
+            d = dict(r)
+            if d.get("finding_id"):
+                fr = self.conn.execute(
+                    "SELECT id, title, ftype, starred FROM findings WHERE id = ?",
+                    (d["finding_id"],)).fetchone()
+                d["finding"] = dict(fr) if fr else None
+            else:
+                d["finding"] = None
+            out.append(d)
+        return out
+
+    def add_lead_item(self, lead_id: int, label: str, status: str = "open",
+                      finding_id: int | None = None, note: str = "") -> int:
+        if not str(label).strip():
+            raise CaseError("lead item label must not be empty")
+        self._require("findings", lead_id, "F")
+        status = self._check_lead_status(status)
+        if finding_id is not None:
+            self._require("findings", finding_id, "F")
+            if status == "open":
+                status = "triaged"   # linking a finding resolves the item
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO lead_items(lead_id, label, status, finding_id, note,"
+                " created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (lead_id, label.strip(), status, finding_id, note, _now()))
+        return cur.lastrowid
+
+    def update_lead_item(self, item_id: int, **fields) -> None:
+        if "status" in fields:
+            fields["status"] = self._check_lead_status(fields["status"])
+        if fields.get("finding_id") is not None:
+            self._require("findings", fields["finding_id"], "F")
+            # linking a finding resolves an otherwise-open item
+            if "status" not in fields:
+                cur = self.conn.execute(
+                    "SELECT status FROM lead_items WHERE id = ?", (item_id,)
+                ).fetchone()
+                if cur and cur["status"] == "open":
+                    fields["status"] = "triaged"
+        self._update("lead_items", self.LEAD_ITEM_EDITABLE, item_id, fields,
+                     "lead item ")
+
+    def soft_delete_lead_item(self, item_id: int) -> None:
+        self._require("lead_items", item_id, "lead item ")
+        with self.conn:
+            self.conn.execute("UPDATE lead_items SET deleted_at = ? WHERE id = ?",
+                              (_now(), item_id))
 
     # -- attachments --------------------------------------------------------
 

@@ -594,6 +594,60 @@ def cmd_artifacts(args) -> int:
     return 0
 
 
+def _resolve_finding_ref(ref: str) -> int:
+    kind, fid = db.resolve_ref(ref)
+    if kind != "F":
+        raise CaseError(f"expected a finding reference like F8, got {ref!r}")
+    return fid
+
+
+_LEAD_ITEM_MARK = {"open": "○", "triaged": "●", "dismissed": "✗"}
+
+
+def cmd_lead(args) -> int:
+    with open_case(args) as case:
+        op = getattr(args, "lead_cmd", None)
+        if op == "add":
+            lead_id = _resolve_finding_ref(args.ref)
+            link_fid = _resolve_finding_ref(args.finding) if args.finding else None
+            item_id = case.add_lead_item(lead_id, args.label,
+                                         status=args.status or "open",
+                                         finding_id=link_fid)
+            print(f"item {item_id} added to F{lead_id}")
+        elif op == "set":
+            fields = {}
+            if args.status:
+                fields["status"] = args.status
+            if args.finding:
+                fields["finding_id"] = _resolve_finding_ref(args.finding)
+            if args.label:
+                fields["label"] = args.label
+            if not fields:
+                raise CaseError("nothing to change — pass --status/--finding/--label")
+            case.update_lead_item(args.item, **fields)
+            print(f"item {args.item} updated")
+        elif op == "rm":
+            case.soft_delete_lead_item(args.item)
+            print(f"item {args.item} removed")
+        else:
+            leads = case.leads()
+            if not leads:
+                print("no leads yet — add one with "
+                      "'vera f \"…\" -t lead --on none'")
+                return 0
+            for L in leads:
+                prog = (f"{L['item_resolved']}/{L['item_total']} triaged"
+                        if L["item_total"] else "no items")
+                star = "★ " if L["starred"] else ""
+                print(f"{fid(L['id'])} {star}{L['title']}  ({prog})")
+                for it in L["items"]:
+                    mark = _LEAD_ITEM_MARK.get(it["status"], "?")
+                    link = f"  → F{it['finding']['id']}" if it["finding"] else ""
+                    print(f"    [{it['id']}] {mark} {it['label']}"
+                          f"{c('2', f' {it['status']}')}{c('2', link)}")
+    return 0
+
+
 def cmd_attach(args) -> int:
     kind, ref_id = db.resolve_ref(args.ref)
     owner = {"A": "action", "F": "finding", "E": "evidence"}[kind]
@@ -959,6 +1013,24 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("artifacts", help="host-based indicators stacked by "
                                          "artifact name, regardless of path")
     p.set_defaults(func=cmd_artifacts)
+
+    p = sub.add_parser("lead", help="triage worklists (leads) and their items")
+    lsub = p.add_subparsers(dest="lead_cmd", required=False)
+    la = lsub.add_parser("add", help="add a worklist item to a lead")
+    la.add_argument("ref", help="the lead finding, e.g. F8")
+    la.add_argument("label", help="the item, e.g. 'stun.exe'")
+    la.add_argument("--finding", metavar="F#",
+                    help="finding that resolves this item (marks it triaged)")
+    la.add_argument("--status", choices=("open", "triaged", "dismissed"))
+    ls = lsub.add_parser("set", help="update a worklist item")
+    ls.add_argument("item", type=int, help="the item id (from 'vera lead')")
+    ls.add_argument("--status", choices=("open", "triaged", "dismissed"))
+    ls.add_argument("--finding", metavar="F#", help="finding that resolves it")
+    ls.add_argument("--label")
+    lr = lsub.add_parser("rm", help="remove a worklist item (soft-delete)")
+    lr.add_argument("item", type=int, help="the item id")
+    lsub.add_parser("list", help="list leads and their items")
+    p.set_defaults(func=cmd_lead)
 
     p = sub.add_parser("coverage", help="per-host analysis rollup — spot hosts "
                                         "nobody has examined yet")

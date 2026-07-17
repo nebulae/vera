@@ -1306,3 +1306,115 @@ def test_cli_artifacts(cli_case, capsys):
     assert main(["artifacts"]) == 0
     out = capsys.readouterr().out
     assert "CRYPTBASE.dll" in out and r"C:\U\slack\CRYPTBASE.dll" in out
+
+
+# ---- leads (triage worklists) ------------------------------------------
+
+def test_lead_items_crud_and_counts(case):
+    a = case.add_action("sweep", method="manual", tool="TLE",
+                        procedure="pull LFO==1")
+    lead = case.add_finding("LFO autoruns across workstations", ftype="lead",
+                            action_id=a, detail="narrator.exe\ngadget.js")
+    real = case.add_finding("narrator.exe WMI", ftype="hostindicator",
+                            action_id=a, attrs={"artifact": "narrator.exe"})
+    i1 = case.add_lead_item(lead, "narrator.exe", finding_id=real)
+    i2 = case.add_lead_item(lead, "gadget.js")
+    i3 = case.add_lead_item(lead, "stun.exe")
+    # linking a finding auto-resolves the item
+    L = case.leads()[0]
+    assert L["item_total"] == 3 and L["item_resolved"] == 1
+    items = {it["label"]: it for it in L["items"]}
+    assert items["narrator.exe"]["status"] == "triaged"
+    assert items["narrator.exe"]["finding"]["id"] == real
+    # update status + link on an open item
+    case.update_lead_item(i2, finding_id=real)
+    assert case.leads()[0]["item_resolved"] == 2
+    case.update_lead_item(i3, status="dismissed")
+    assert case.leads()[0]["item_resolved"] == 3
+    # soft-delete never purges but drops from the worklist
+    case.soft_delete_lead_item(i2)
+    L = case.leads()[0]
+    assert L["item_total"] == 2
+    row = case.conn.execute("SELECT deleted_at FROM lead_items WHERE id = ?",
+                            (i2,)).fetchone()
+    assert row["deleted_at"] != ""
+    # bad status rejected
+    with pytest.raises(CaseError):
+        case.update_lead_item(i1, status="bogus")
+
+
+def test_leads_excluded_from_stack_and_artifacts(case):
+    for h in ("RD01", "RD02"):
+        case.add_host(h)
+    a = case.add_action("sweep")
+    lead = case.add_finding("worklist", ftype="lead", action_id=a,
+                            host_ids=[case.resolve_host("RD01"),
+                                      case.resolve_host("RD02")])
+    case.add_finding("gadget.js", ftype="hostindicator", action_id=a,
+                     host_ids=[case.resolve_host("RD01")],
+                     attrs={"artifact": "gadget.js", "path": r"c:\x\gadget.js"})
+    # lead has 2 hosts but must NOT appear as a cross-host finding
+    assert all(f["id"] != lead for f in case.stack_findings())
+    # nor as an artifact
+    assert all(g["name"] != "worklist" for g in case.artifact_stacks())
+
+
+def test_migration_v10_to_v11_adds_lead_items(tmp_path):
+    p = str(tmp_path / "v10.vera")
+    c = Case(p, create=True)
+    lead = c.add_finding("worklist", ftype="lead")
+    c.conn.execute("DROP TABLE lead_items")
+    c.conn.execute("UPDATE case_meta SET value='10' WHERE key='schema_version'")
+    c.conn.commit()
+    c.close()
+    with Case(p) as c2:
+        assert c2.meta()["schema_version"] == str(db.SCHEMA_VERSION)
+        iid = c2.add_lead_item(lead, "stun.exe")
+        assert c2.leads()[0]["items"][0]["label"] == "stun.exe"
+        assert iid
+
+
+def test_api_leads(running_server):
+    port = running_server
+    # create a lead finding, then manage its worklist via the API
+    status, raw = _req(port, "POST", "/api/findings",
+                       {"title": "LFO worklist", "ftype": "lead"})
+    lead = json.loads(raw)["id"]
+    status, raw = _req(port, "POST", f"/api/leads/{lead}/items",
+                       {"label": "narrator.exe"})
+    assert status == 201
+    item = json.loads(raw)["id"]
+    status, raw = _req(port, "GET", "/api/leads")
+    L = json.loads(raw)[0]
+    assert L["item_total"] == 1 and L["item_resolved"] == 0
+    status, _ = _req(port, "PATCH", f"/api/lead_items/{item}",
+                     {"status": "triaged"})
+    assert status == 200
+    assert json.loads(_req(port, "GET", "/api/leads")[1])[0]["item_resolved"] == 1
+    status, _ = _req(port, "DELETE", f"/api/lead_items/{item}")
+    assert status == 200
+    assert json.loads(_req(port, "GET", "/api/leads")[1])[0]["item_total"] == 0
+
+
+def test_cli_lead(cli_case, capsys):
+    assert main(["finding", "LFO sweep", "-t", "lead", "--on", "none"]) == 0
+    assert main(["finding", "narrator.exe", "-t", "hostindicator", "--on", "none",
+                 "--path", r"c:\windows\update\narrator.exe"]) == 0
+    capsys.readouterr()
+    assert main(["lead", "add", "F1", "narrator.exe", "--finding", "F2"]) == 0
+    assert main(["lead", "add", "F1", "stun.exe"]) == 0
+    capsys.readouterr()
+    assert main(["lead"]) == 0
+    out = capsys.readouterr().out
+    assert "LFO sweep" in out and "1/2 triaged" in out
+    assert "narrator.exe" in out and "→ F2" in out
+
+
+def test_lead_in_md_export(case):
+    a = case.add_action("sweep")
+    lead = case.add_finding("LFO worklist", ftype="lead", action_id=a)
+    case.add_lead_item(lead, "narrator.exe", status="triaged")
+    case.add_lead_item(lead, "stun.exe")
+    md = export.render_md(case)
+    assert "Leads (triage worklists)" in md
+    assert "narrator.exe" in md and "stun.exe" in md

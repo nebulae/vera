@@ -182,6 +182,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(case.stack_findings())
             elif url.path == "/api/artifacts":
                 self._json(case.artifact_stacks())
+            elif url.path == "/api/leads":
+                self._json(case.leads())
             elif url.path == "/api/host_findings":
                 hid = int((q.get("id") or [0])[0])
                 self._json(case.findings_for_host(hid))
@@ -223,6 +225,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"id": aid}, 201)
             elif method == "POST" and url.path == "/api/attachments":
                 self._add_attachment(case, body)
+            elif method == "POST" and re.fullmatch(
+                    r"/api/leads/(\d+)/items", url.path):
+                lead_id = int(url.path.split("/")[3])
+                item_id = case.add_lead_item(
+                    lead_id, body.get("label", ""),
+                    status=body.get("status", "open"),
+                    finding_id=body.get("finding_id"),
+                    note=body.get("note", ""))
+                self._json({"id": item_id}, 201)
             elif method == "DELETE":
                 m = re.fullmatch(r"/api/attachments/(\d+)", url.path)
                 if m:
@@ -232,6 +243,11 @@ class Handler(BaseHTTPRequestHandler):
                 m = re.fullmatch(r"/api/hosts/(\d+)", url.path)
                 if m:
                     case.soft_delete_host(int(m.group(1)))
+                    self._json({"ok": True})
+                    return
+                m = re.fullmatch(r"/api/lead_items/(\d+)", url.path)
+                if m:
+                    case.soft_delete_lead_item(int(m.group(1)))
                     self._json({"ok": True})
                     return
                 self._error("not found", 404)
@@ -271,6 +287,10 @@ class Handler(BaseHTTPRequestHandler):
                     scope=body.get("scope", ""), notes=body.get("notes", ""),
                     host_ids=self._host_ids(case, body))
                 self._json({"id": cid}, 201)
+            elif method == "PATCH" and re.fullmatch(r"/api/lead_items/(\d+)", url.path):
+                item_id = int(url.path.split("/")[3])
+                case.update_lead_item(item_id, **body)
+                self._json({"ok": True})
             elif method == "PATCH":
                 m = re.fullmatch(
                     r"/api/(actions|findings|hosts|evidence|collections)/(\d+)",

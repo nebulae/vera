@@ -128,6 +128,13 @@ retyping a name.
   the evidence, steps, and findings that reference it, plus which tools were
   used and when it was last examined. Hosts with no analysis logged are called
   out — the answer to "did we look at everything?".
+- **Lead** (a finding type) — a **triage worklist**, not an indicator: e.g. the
+  rows an LFO autoruns sweep surfaced. A lead carries a checklist of **items**
+  you work through, each markable `open` / `triaged` / `dismissed` and linkable
+  to the finding that resolved it (`vera lead`, or the web **Leads** tab, shows
+  "N of M triaged"). Leads are deliberately kept **out of the Artifacts and
+  cross-host Stack views** — only the concrete indicators you drill down to
+  belong there.
 - **Artifacts** — `vera artifacts` (and the web **Artifacts** tab) stacks
   host-based indicators by artifact **name regardless of path**: the same planted
   DLL name seen in several app directories across hosts collapses into one entry
@@ -168,6 +175,8 @@ original run.
   hosts highlighted.
 - **Artifacts** — host-based indicators stacked by artifact name regardless of
   path; the Host Indicators tab groups by name by default (toggle to flat)
+- **Leads** — triage worklists (e.g. an LFO sweep): add/check off items, link
+  each to the finding that resolved it, track "N of M triaged"
 - **Category tabs** — Compromised Hosts / Accounts, Malware & Tools,
   Network / Host Indicators, generated automatically from finding types
 - **Evidence** — items and hashes, plus collections/batches

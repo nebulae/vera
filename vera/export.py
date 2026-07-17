@@ -299,6 +299,27 @@ def render_md(case: Case, linker=None) -> str:
               f"| {_mdcell(hosts)} | {paths} |")
         w("")
 
+    leads = case.leads()
+    if leads:
+        w("## Leads (triage worklists)")
+        w("")
+        mark = {"open": "☐", "triaged": "☑", "dismissed": "▨"}
+        for L in leads:
+            prog = (f" — {L['item_resolved']}/{L['item_total']} triaged"
+                    if L["item_total"] else "")
+            star = "★ " if L["starred"] else ""
+            w(f"### {star}F{L['id']} {_mdcell(L['title'])}{prog}")
+            w("")
+            if not L["items"]:
+                w("_No worklist items._")
+                w("")
+                continue
+            for it in L["items"]:
+                link = f" → F{it['finding']['id']}" if it["finding"] else ""
+                w(f"- {mark.get(it['status'], '☐')} {_mdcell(it['label'])} "
+                  f"(_{it['status']}_){link}")
+            w("")
+
     for ft in types.FINDING_TYPES.values():
         if not ft.csv_name:
             continue

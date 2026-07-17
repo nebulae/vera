@@ -630,13 +630,13 @@ function hostNames(hosts) {
 
 // One consistent host chip used on actions, findings and leads: the first few
 // names, then "(… and N more)", with the full list on hover; click → Hosts tab.
-function hostsInline(hosts, max = 5) {
+function hostsInline(hosts, max = 3) {
   const list = hosts || [];
   if (!list.length) return null;
   const names = list.map((h) => h.name);
   const shown = names.slice(0, max).join(", ");
   const extra = names.length - max;
-  const text = `🖥 ${shown}${extra > 0 ? ` (… and ${extra} more)` : ""}`;
+  const text = extra > 0 ? `🖥 ${shown} +${extra} more` : `🖥 ${shown}`;
   return el("span", { class: "hosts-inline",
     title: `${names.length} host${names.length > 1 ? "s" : ""}: ${names.join(", ")}`,
     onclick: (ev) => { ev.stopPropagation(); state.tab = "hosts"; render(); } }, text);
@@ -1081,7 +1081,7 @@ function findingCard(f) {
     el("span", { class: `ref ${isLead ? "l" : "f"}` }, `F${f.id}`),
     el("span", { class: `tag${isLead ? " lead" : ""}` }, t.label),
     star,
-    el("span", { class: "node-title" }, f.title),
+    el("span", { class: "node-title", title: f.title }, f.title),
     hostsInline(f.affected_hosts),
     el("span", { class: "spacer" }),
     collapsed && nAct ? el("span", { class: "meta find-count", title: "follow-up actions" },
@@ -1607,7 +1607,7 @@ function leadCard(L) {
     el("span", { class: "ref l" }, `F${L.id}`),
     el("span", { class: "tag lead" }, "lead"),
     starToggle(L),
-    el("span", { class: "node-title" }, L.title),
+    el("span", { class: "node-title", title: L.title }, L.title),
     hostsInline(L.affected_hosts),
     el("span", { class: "lead-progress" + (done ? " done" : "") }, progress));
   const card = el("div", { class: "card node-lead lead-card", id: `node-F${L.id}` }, head);

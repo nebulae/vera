@@ -170,14 +170,24 @@ label.field input:focus, label.field select:focus, label.field textarea:focus {
 .node-finding { border-left: 3px solid var(--finding); }
 .children { margin-left: 22px; }
 
-.node-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+/* single-line header: identity on the left, meta pinned right, middle bits
+   (tool / title / hosts) truncate under pressure instead of wrapping */
+.node-head { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
 .node-head.clickable { cursor: pointer; }
 .node-head .spacer { flex: 1 1 auto; min-width: 8px; }
-.node-time { white-space: nowrap; opacity: 0.85; }
+.node-time { white-space: nowrap; opacity: 0.85; flex: none; }
+.node-head .find-count, .node-head .meta { flex: none; }
 .tool-label {
   font-size: 13px; font-weight: 600; color: var(--ink);
-  max-width: 38ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 0 1 auto; min-width: 8ch; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
 }
+.node-title {
+  flex: 0 1 auto; min-width: 6ch; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.node-head .hosts-inline { flex: 0 4 auto; }
+.node-head .collapsed-preview { flex: 0 2 auto; }
 .collapse-toggle {
   border: none; background: none; color: var(--muted); cursor: pointer;
   font-size: 12px; padding: 0 2px; line-height: 1; flex: none;
@@ -541,7 +551,7 @@ details.collapsible .proc-steps { margin-top: 6px; }
   font-size: 12px; color: var(--muted); cursor: pointer;
   background: color-mix(in srgb, var(--ink) 7%, transparent);
   border-radius: 6px; padding: 1px 8px;
-  white-space: nowrap; max-width: 52ch; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
 .hosts-inline:hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 

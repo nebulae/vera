@@ -129,9 +129,10 @@ _register(FindingType(
     label="Host-Based Indicator",
     view="Host Indicators",
     fields=(
-        Field("artifact_type", "Artifact Type", "prefetch, shimcache, service, dll ..."),
-        Field("artifact", "Artifact Name", "e.g. CRYPTBASE.dll — the stackable name (auto-filled from the path)"),
+        # path first: paste the full location and the name auto-fills from it
         Field("path", "Full Path", r"full location, e.g. C:\Users\...\CRYPTBASE.dll"),
+        Field("artifact", "Artifact Name", "e.g. CRYPTBASE.dll — the stackable name (auto-filled from the path)"),
+        Field("artifact_type", "Artifact Type", "prefetch, shimcache, service, dll ..."),
     ),
     csv_name="HostBasedIndicators",
     csv_headers=("Artifact Type", "Date/Time", "Artifact", "Path", "Host"),

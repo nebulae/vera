@@ -446,7 +446,10 @@ function roleSnippet(h) {
   return parts.length > 1 ? parts.slice(1).join(" - ") : (h.notes || "");
 }
 
-function hostPicker(initial, hint) {
+function hostPicker(initial, opts = {}) {
+  // opts: { label, hint }. label renders inline with the chips; hint is a subtle
+  // note shown inside the (collapsed-by-default) picker. A bare string = hint.
+  const { label = "", hint = "" } = typeof opts === "string" ? { hint: opts } : opts;
   const chosen = new Map();  // id -> host object (from state.info.hosts)
   const byId = new Map((state.info.hosts || []).map((h) => [h.id, h]));
   for (const h of (initial || [])) {
@@ -592,6 +595,7 @@ function hostPicker(initial, hint) {
   // real estate; keep it collapsed and show just the chosen chips until the
   // analyst chooses to edit
   const editor = el("div", { class: "host-editor", style: "display:none" },
+    hint ? el("div", { class: "hint host-editor-hint" }, hint) : null,
     el("div", { class: "host-picker-controls" }, search, addToggle),
     addForm, quickBar, list);
   const editBtn = el("button", { type: "button", class: "btn small ghost host-edit-toggle" });
@@ -606,10 +610,11 @@ function hostPicker(initial, hint) {
     if (editor.style.display !== "none") setTimeout(() => search.focus(), 0);
   });
 
-  const wrap = el("div", { class: "host-picker" },
-    el("div", { class: "host-tags-head" },
-      el("span", { class: "hint" }, hint || "Select from the registry."), count),
-    chips,
+  // compact header: "Label:  <chips>  <count aligned right>", edit toggle below
+  const wrap = el("div", { class: "host-picker compact" },
+    el("div", { class: "host-head" },
+      label ? el("span", { class: "host-head-label" }, label + ":") : null,
+      chips, count),
     editBtn,
     editor);
   refresh();
@@ -666,7 +671,7 @@ function starToggle(f) {
       await api(`/api/findings/${f.id}`, { method: "PATCH", body: { starred: f.starred ? 0 : 1 } });
       await reload(`node-F${f.id}`);
     },
-  }, "★");
+  }, f.starred ? "★" : "☆");
 }
 
 /* ---------- finding form (shared: add + edit) ---------- */
@@ -702,8 +707,9 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
     "📎 Attach screenshot proof — drop, choose, or paste. Several views are fine.");
   // a new finding inherits the host(s) of the action it hangs off — you can adjust
   const initialHosts = seed ? seed.affected_hosts : (inheritHosts || []);
-  const picker = hostPicker(initialHosts,
-    "inherited from the step — adjust if it spans more or fewer hosts; 2+ = cross-host");
+  const picker = hostPicker(initialHosts, {
+    label: "Affected host(s)",
+    hint: "inherited from the step — adjust if it spans more or fewer hosts; 2+ = cross-host" });
 
   // hashes: md5 / sha1 / sha256 of the file this finding is about
   const HASHES = [["md5", "MD5", 32], ["sha1", "SHA-1", 40], ["sha256", "SHA-256", 64]];
@@ -722,9 +728,10 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
   // a second-class checkbox
   let starred = !!(seed && seed.starred);
   const starBtn = el("span", { class: "form-star" + (starred ? "" : " off"),
-    role: "button", tabindex: "0" }, "★");
+    role: "button", tabindex: "0" }, starred ? "★" : "☆");
   const syncStar = () => {
     starBtn.classList.toggle("off", !starred);
+    starBtn.textContent = starred ? "★" : "☆";
     starBtn.title = starred ? "Key finding — click to unflag" : "Flag as a key finding";
   };
   const toggleStar = (ev) => { ev.preventDefault(); ev.stopPropagation(); starred = !starred; syncStar(); };
@@ -742,7 +749,7 @@ function findingForm({ actionId, inheritHosts, existing, template, done, close }
     field("Event time (in the incident)", textInput("event_time", "e.g. 2026-07-01 14:22",
       seed ? seed.event_time : "")),
     attrsGrid,
-    divField("Affected host(s)", picker.el, true),
+    el("div", { class: "field wide" }, picker.el),
     field("File hashes (optional)", hashGrid, true),
     field("Detail / evidence for this finding",
       el("textarea", { name: "detail" }, seed ? seed.detail : ""), true),
@@ -1742,12 +1749,11 @@ function openEvidenceEditor(e) {
     ...collections.map((c) => el("option", {
       value: String(c.id), selected: e.collection_id === c.id ? "" : null,
     }, `C${c.id} ${c.name}`))) : null;
-  const picker = hostPicker(e.hosts || [],
-    "Source host(s) — which system(s) this evidence came from.");
+  const picker = hostPicker(e.hosts || [], {
+    label: "Source host(s)", hint: "which system(s) this evidence came from" });
   // hosts are editable only for standalone evidence; in a collection they are
   // managed on the collection (and re-derived if the evidence moves into one)
-  const pickerWrap = el("div", {},
-    el("h4", { class: "host-panel-h" }, "Source host(s)"), picker.el);
+  const pickerWrap = el("div", {}, picker.el);
   const colNote = el("div", { class: "hint host-note" });
   const syncHosts = () => {
     const cid = colSel && colSel.value ? Number(colSel.value) : null;
@@ -1813,8 +1819,9 @@ function openCollectionEditor(c) {
   const toolI = el("input", { value: c.tool || "" });
   const opI = el("input", { value: c.operator || "" });
   const scopeI = el("input", { value: c.scope || "" });
-  const picker = hostPicker(c.hosts || [],
-    "Hosts this collection covers — evidence in it inherits and follows these (per-host items keep their own).");
+  const picker = hostPicker(c.hosts || [], {
+    label: "Hosts covered",
+    hint: "evidence in it inherits and follows these (per-host items keep their own)" });
   const err = el("div", { class: "form-error" });
   const overlay = el("div", { class: "lightbox" },
     el("div", { class: "host-panel", onclick: (ev) => ev.stopPropagation() },
@@ -1823,7 +1830,6 @@ function openCollectionEditor(c) {
         el("label", { class: "field wide" }, "Name", nameI),
         f("Tool", toolI), f("Operator", opI),
         el("label", { class: "field wide" }, "Scope", scopeI)),
-      el("h4", { class: "host-panel-h" }, "Hosts covered"),
       picker.el,
       el("div", { class: "form-actions" },
         el("button", { class: "btn primary", onclick: async () => {
@@ -1856,15 +1862,16 @@ async function renderEvidence(view) {
       "A collection is a batch/sweep (e.g. an export from 40 hosts) with its " +
       "provenance and the hosts it covers. Evidence added to it inherits those hosts."));
   colBtn.addEventListener("click", () => openFormModal("Add a collection", (close) => {
-    const picker = hostPicker([],
-      "Hosts this collection covers — evidence in it inherits and follows these (per-host items keep their own).");
+    const picker = hostPicker([], {
+      label: "Hosts covered",
+      hint: "evidence in it inherits and follows these (per-host items keep their own)" });
     return formCard({
       fields: [
         field("Collection name", textInput("name", "Lab2 amcache+shimcache export"), true),
         field("Tool", textInput("tool", "AmcacheParser / KAPE / Velociraptor …")),
         field("Operator", textInput("operator")),
         field("Scope", textInput("scope", "40 hosts, amcache+shimcache"), true),
-        divField("Hosts covered", picker.el, true),
+        el("div", { class: "field wide" }, picker.el),
       ],
       submitLabel: "Add collection",
       oncancel: close,
@@ -1937,9 +1944,9 @@ async function renderEvidence(view) {
   addBtn.addEventListener("click", () => openFormModal("Add evidence", (close) => {
     // hosts are editable here only for standalone evidence; inside a
     // collection they come from (and are edited on) the collection
-    const picker = hostPicker([],
-      "Source host(s) — which system(s) this evidence came from.");
-    const pickerField = divField("Source host(s)", picker.el, true);
+    const picker = hostPicker([], {
+      label: "Source host(s)", hint: "which system(s) this evidence came from" });
+    const pickerField = el("div", { class: "field wide" }, picker.el);
     const colNote = el("div", { class: "hint host-note" });
     const noteField = el("div", { class: "field wide" }, colNote);
     const cSel = colField();

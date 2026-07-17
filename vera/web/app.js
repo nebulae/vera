@@ -979,17 +979,18 @@ function actionCard(a) {
   const head = el("div", { class: "node-head clickable", onclick: toggle },
     caret,
     el("span", { class: "ref a" }, `A${a.id}`),
-    el("span", { class: "tag" }, a.tool || "action"),
+    el("span", { class: "tool-label", title: a.tool || "action" }, a.tool || "action"),
     evidenceTag,
     manual ? el("span", { class: "tag method" }, "manual") : null,
     hostsInline(a.hosts),
-    el("span", { class: "meta" }, a.performed_at),
+    collapsed && !manual ? el("span", { class: "meta collapsed-preview mono" },
+      "$ " + (a.command || "").split("\n")[0]) : null,
+    el("span", { class: "spacer" }),
+    nFind ? el("span", { class: "meta find-count", title: "findings in this step's drill-down" },
+      `🔎 ${nFind}`) : null,
     a.exit_code !== null && a.exit_code !== undefined && a.exit_code !== 0
       ? el("span", { class: "meta", style: "color: var(--danger)" }, `exit ${a.exit_code}`) : null,
-    collapsed ? el("span", { class: "meta collapsed-preview" },
-      "— " + (manual ? `🔧 ${a.tool}` : `$ ${(a.command || "").split("\n")[0]}`)) : null,
-    nFind ? el("span", { class: "meta find-count", title: "findings in this step's drill-down" },
-      `🔎 ${nFind} finding${nFind > 1 ? "s" : ""}`) : null);
+    el("span", { class: "meta node-time" }, a.performed_at));
   card.append(head);
   if (collapsed) return card;
 
@@ -1082,9 +1083,10 @@ function findingCard(f) {
     star,
     el("span", { class: "node-title" }, f.title),
     hostsInline(f.affected_hosts),
-    f.event_time ? el("span", { class: "meta" }, f.event_time) : null,
-    collapsed && nAct ? el("span", { class: "meta find-count" },
-      `${nAct} follow-up${nAct > 1 ? "s" : ""}`) : null));
+    el("span", { class: "spacer" }),
+    collapsed && nAct ? el("span", { class: "meta find-count", title: "follow-up actions" },
+      `↳ ${nAct}`) : null,
+    f.event_time ? el("span", { class: "meta node-time" }, f.event_time) : null));
   if (collapsed) return card;
 
   // a lead is a worklist, not an indicator — don't show host-indicator-style

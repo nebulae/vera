@@ -262,6 +262,7 @@ class Handler(BaseHTTPRequestHandler):
                     attrs=body.get("attrs") or {},
                     hashes=body.get("hashes") or {},
                     starred=bool(body.get("starred")),
+                    evidence_id=body.get("evidence_id"),
                     host_ids=self._host_ids(case, body))
                 self._json({"id": fid}, 201)
             elif method == "POST" and url.path == "/api/evidence":

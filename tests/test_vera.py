@@ -1504,3 +1504,70 @@ def test_cli_clone_action(cli_case, capsys):
     assert main(["show", "A2"]) == 0
     show = capsys.readouterr().out
     assert "Select-String gadget.js" in show
+
+
+# ---- evidence cascade (action -> finding -> follow-up action) ----------
+
+def test_evidence_cascades_through_the_graph(case):
+    case.add_host("RD01")
+    e = case.add_evidence("autoruns csv", host_ids=[case.resolve_host("RD01")])
+    a = case.add_action("sweep", evidence_id=e)
+    f = case.add_finding("lead", ftype="lead", action_id=a)
+    assert case.get_finding(f)["evidence_id"] == e          # finding <- action
+    sub = case.add_action("Select-String x", parent_finding_id=f)
+    assert case.get_action(sub)["evidence_id"] == e          # follow-up <- finding
+    ff = case.add_finding("narrator.exe", action_id=sub)
+    assert case.get_finding(ff)["evidence_id"] == e          # sub-finding <- sub-action
+    # explicit evidence overrides the inherited one
+    e2 = case.add_evidence("other")
+    f2 = case.add_finding("x", action_id=a, evidence_id=e2)
+    assert case.get_finding(f2)["evidence_id"] == e2
+    # a finding with no action has no evidence
+    f3 = case.add_finding("standalone", ftype="note")
+    assert case.get_finding(f3)["evidence_id"] is None
+    # clone copies the evidence; update can change it
+    assert case.get_finding(case.clone_finding(f))["evidence_id"] == e
+    case.update_finding(f2, evidence_id=e)
+    assert case.get_finding(f2)["evidence_id"] == e
+    with pytest.raises(CaseError):
+        case.add_finding("bad", action_id=a, evidence_id=999)
+
+
+def test_migration_v11_to_v12_adds_finding_evidence(tmp_path):
+    p = str(tmp_path / "v11.vera")
+    c = Case(p, create=True)
+    e = c.add_evidence("disk")
+    a = c.add_action("x", evidence_id=e)
+    on_action = c.add_finding("has action", action_id=a)   # should backfill to e
+    standalone = c.add_finding("no action", ftype="note")  # stays NULL
+    # roll back to a v11-shaped findings table (no evidence_id column)
+    c.conn.execute("ALTER TABLE findings DROP COLUMN evidence_id")
+    c.conn.execute("UPDATE case_meta SET value='11' WHERE key='schema_version'")
+    c.conn.commit()
+    c.close()
+    with Case(p) as c2:
+        assert c2.meta()["schema_version"] == str(db.SCHEMA_VERSION)
+        assert c2.get_finding(on_action)["evidence_id"] == e   # backfilled
+        assert c2.get_finding(standalone)["evidence_id"] is None
+        # and new work cascades
+        f2 = c2.add_finding("y", action_id=a)
+        assert c2.get_finding(f2)["evidence_id"] == e
+
+
+def test_api_finding_evidence(running_server):
+    port = running_server
+    status, raw = _req(port, "POST", "/api/evidence", {"label": "triage E"})
+    eid = json.loads(raw)["id"]
+    status, raw = _req(port, "POST", "/api/actions", {"command": "x", "evidence_id": eid})
+    aid = json.loads(raw)["id"]
+    # a finding on that action inherits the evidence
+    status, raw = _req(port, "POST", "/api/findings", {"title": "f", "action_id": aid})
+    fid = json.loads(raw)["id"]
+    info = json.loads(_req(port, "GET", "/api/tree")[1])
+    fin = next(f for a in info["roots"] for f in a["findings"] if f["id"] == fid)
+    assert fin["evidence_id"] == eid
+    # PATCH can change it
+    status, raw = _req(port, "POST", "/api/evidence", {"label": "other E"})
+    eid2 = json.loads(raw)["id"]
+    status, _ = _req(port, "PATCH", f"/api/findings/{fid}", {"evidence_id": eid2})
+    assert status == 200

@@ -130,6 +130,33 @@ _register(FindingType(
                        _attrs(f).get("source", ""), f.get("detail", "")],
 ))
 
+# Movement is DIRECTIONAL — the affected-hosts set can't say which way it
+# went, so source/destination live here as attrs while both hosts are also
+# linked (m2m) for stacking. Entry layers auto-link registry hosts matching
+# the source/dest names.
+_register(FindingType(
+    key="lateral",
+    label="Lateral Movement",
+    view="Lateral Movement",
+    group="indicator",
+    fields=(
+        Field("source_host", "Source Host", "where the movement came FROM"),
+        Field("dest_host", "Destination Host", "where it went TO"),
+        Field("technique", "Technique",
+              "WMI / PsExec / RDP / SMB / WinRM / scheduled task …"),
+        Field("account", "Account Used", "account that authenticated"),
+    ),
+    csv_name="LateralMovement",
+    csv_headers=("Date / Time", "Source Host", "Destination Host",
+                 "Technique", "Account", "Description"),
+    csv_row=lambda f: [f.get("event_time", ""),
+                       _attrs(f).get("source_host", ""),
+                       _attrs(f).get("dest_host", ""),
+                       _attrs(f).get("technique", ""),
+                       _attrs(f).get("account", ""),
+                       f.get("detail", "") or f.get("title", "")],
+))
+
 _register(FindingType(
     key="hostindicator",
     label="Host-Based Indicator",

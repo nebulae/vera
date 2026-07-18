@@ -770,6 +770,18 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
         if (auto) nameInp.value = basename(pathInp.value.trim());
       });
     }
+    // lateral movement: typing a registry host name as source/dest auto-links
+    // it into the affected-hosts set (direction lives in the attrs)
+    for (const key of ["source_host", "dest_host"]) {
+      const inp = attrsGrid.querySelector(`[name="attr:${key}"]`);
+      if (!inp) continue;
+      inp.addEventListener("change", () => {
+        const name = inp.value.trim().toLowerCase();
+        const h = (state.info.hosts || []).find(
+          (x) => x.name.toLowerCase() === name);
+        if (h) picker.addHosts([h]);
+      });
+    }
   }
   typeSelect.addEventListener("change", renderAttrFields);
 
@@ -1222,10 +1234,19 @@ function findingCard(f) {
 
   // a lead is a worklist, not an indicator — don't show host-indicator-style
   // artifact chips on it (its worklist lives in the Leads tab)
+  const isLateral = f.ftype === "lateral";
   const chips = Object.entries(f.attrs || {})
-    .filter(([k, v]) => v && (!isLead || k === "source"));
-  if (chips.length) {
+    .filter(([k, v]) => v && (!isLead || k === "source")
+      // lateral: source/dest render as one directional chip instead
+      && (!isLateral || (k !== "source_host" && k !== "dest_host")));
+  const a = f.attrs || {};
+  const arrow = isLateral && (a.source_host || a.dest_host)
+    ? el("span", { class: "lateral-arrow" },
+        el("b", {}, a.source_host || "?"), " ⟶ ", el("b", {}, a.dest_host || "?"))
+    : null;
+  if (chips.length || arrow) {
     card.append(el("div", { class: "attr-chips" },
+      arrow,
       chips.map(([k, v]) => el("span", {}, el("b", {}, k.replaceAll("_", " ") + ": "),
         (k === "path" || k === "sid") ? el("code", { class: "mono" }, v) : v))));
   }

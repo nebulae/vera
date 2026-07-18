@@ -1792,3 +1792,43 @@ def test_timeline_csv_has_time_meaning(case, tmp_path):
     rows = list(_csv.reader(open(tl)))
     assert rows[0] == ["Date / Time", "Host Name", "Activity", "Time Meaning"]
     assert rows[-1][3] == "executed"
+
+
+# ---- v0.18.0: lateral movement -----------------------------------------
+
+def test_lateral_movement_type_and_csv(case, tmp_path):
+    a = case.add_action("chainsaw hunt 4624")
+    case.add_finding("WMI exec RD01 -> DC01", ftype="lateral", action_id=a,
+                     event_time="2023-01-13 18:02", time_kind="logged",
+                     detail="4624 type 3 + WmiPrvSE spawn",
+                     attrs={"source_host": "RD01", "dest_host": "DC01",
+                            "technique": "WMI", "account": "svc-backup"})
+    written = export.export(case, "csv", str(tmp_path / "out"))
+    lat = next(p for p in written if p.endswith("_LateralMovement.csv"))
+    import csv as _csv
+    rows = list(_csv.reader(open(lat)))
+    assert rows[0] == ["Date / Time", "Source Host", "Destination Host",
+                       "Technique", "Account", "Description"]
+    assert rows[1][1] == "RD01" and rows[1][2] == "DC01"
+    assert rows[1][3] == "WMI" and rows[1][4] == "svc-backup"
+
+
+def test_lateral_cli_autolinks_registry_hosts(tmp_path):
+    casep = str(tmp_path / "lm.vera")
+    assert main(["init", casep, "--name", "T"]) == 0
+    assert main(["--case", casep, "host", "add", "RD01", "DC01"]) == 0
+    assert main(["--case", casep, "run", "echo hunt"]) == 0
+    assert main(["--case", casep, "f", "psexec RD01 to DC01", "-t", "lateral",
+                 "--source-host", "RD01", "--dest-host", "DC01",
+                 "--technique", "PsExec"]) == 0
+    with Case(casep) as c:
+        f = c.findings("lateral")[0]
+        names = {h["name"] for h in f["affected_hosts"]}
+        assert names == {"RD01", "DC01"}          # both endpoints linked
+        assert f["attrs"]["source_host"] == "RD01"  # direction preserved
+    # an endpoint outside the registry is kept in attrs but not linked
+    assert main(["--case", casep, "f", "rdp from attacker box", "-t", "lateral",
+                 "--source-host", "203.0.113.9", "--dest-host", "RD01"]) == 0
+    with Case(casep) as c:
+        f2 = c.findings("lateral")[1]
+        assert {h["name"] for h in f2["affected_hosts"]} == {"RD01"}

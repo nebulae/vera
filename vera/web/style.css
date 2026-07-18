@@ -831,6 +831,18 @@ tr.st-clean td { background: color-mix(in srgb, #16a34a 6%, transparent); }
   .st-pill.st-clean { color: #4ade80; }
 }
 
+/* compromised-hosts page: disposition section above the host-type findings */
+.cat-subhead {
+  margin: 18px 0 4px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+}
+.cat-subhead:first-child { margin-top: 0; }
+tr.host-row[title] { cursor: pointer; }
+tr.host-row[title]:hover td { filter: brightness(1.06); }
+
 /* coverage matrix */
 .cov-summary { margin: 2px 0 14px; font-weight: 600; font-size: 14px; }
 .cov-warn { color: #b45309; }

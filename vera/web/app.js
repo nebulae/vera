@@ -892,6 +892,11 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
     }, seed ? seed.procedure : ""), true);
   const outputField = existing ? null
     : field("Captured output (paste, optional)", el("textarea", { name: "output" }), true);
+  // exit code distinguishes "ran and found nothing" (0) from "failed to run"
+  const exitField = field("Exit code (optional — 0 = success)",
+    el("input", { name: "exit_code", type: "number", placeholder: "0",
+      value: seed && seed.exit_code !== null && seed.exit_code !== undefined
+        ? String(seed.exit_code) : "" }));
   const shots = existing ? null
     : pendingShots("output",
         "📎 Screenshot(s) of the result — drop, choose, or paste. Add several views if useful.");
@@ -925,6 +930,7 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
     commandField.style.display = manual ? "none" : "";
     procedureField.style.display = manual ? "" : "none";
     if (outputField) outputField.style.display = manual ? "none" : "";
+    exitField.style.display = manual ? "none" : "";
   }
   method.addEventListener("change", sync);
 
@@ -938,6 +944,7 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
     field("Why you did it / notes", el("textarea", { name: "notes" },
       seed ? seed.notes : (prefillNotes || "")), true),
     outputField,
+    exitField,
     shots ? field("Screenshot", shots.el, true) : null,
   ];
 
@@ -961,6 +968,8 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
         payload.command = data.get("command").trim();
         payload.procedure = "";
         if (!payload.command) throw new Error("the command is required");
+        const ec = data.get("exit_code");
+        payload.exit_code = ec === "" || ec === null ? null : Number(ec);
       }
       if (existing) {
         await api(`/api/actions/${existing.id}`, { method: "PATCH", body: payload });
@@ -1572,6 +1581,7 @@ async function renderCategory(view, typeKey) {
   const t = typeInfo(typeKey);
   if (typeKey === "hostindicator") return renderHostIndicators(view, t);
   if (typeKey === "lead") return renderLeads(view);
+  if (typeKey === "host") return renderCompromisedHosts(view, t);
   const rows = await api(`/api/findings?type=${encodeURIComponent(typeKey)}`);
   if (!rows.length) {
     emptyState(view, `No ${t.view.toLowerCase()} recorded yet`,
@@ -1579,6 +1589,64 @@ async function renderCategory(view, typeKey) {
     return;
   }
   view.replaceChildren(el("div", { class: "table-wrap" }, categoryTable(t, rows)));
+}
+
+// The Compromised Hosts page is fed by TWO sources: the disposition flag set on
+// the Hosts registry (the quick triage call) and any host-type findings (the
+// narrative record). Dispositions come first so a host marked compromised or
+// suspicious shows here without having to also enter it as a finding.
+async function renderCompromisedHosts(view, t) {
+  const [allHosts, rows] = await Promise.all([
+    api("/api/hosts"),
+    api("/api/findings?type=host"),
+  ]);
+  const rank = { compromised: 0, suspicious: 1 };
+  const flagged = allHosts
+    .filter((h) => h.status === "compromised" || h.status === "suspicious")
+    .sort((a, b) => (rank[a.status] - rank[b.status])
+      || (b.finding_count - a.finding_count)
+      || a.name.localeCompare(b.name));
+
+  if (!flagged.length && !rows.length) {
+    emptyState(view, "No compromised hosts recorded yet",
+      "Mark a host compromised or suspicious in the Hosts tab, or add a finding "
+      + "with type “Compromised Host” — either surfaces here automatically.");
+    return;
+  }
+
+  view.replaceChildren();
+  if (flagged.length) {
+    view.append(
+      el("h3", { class: "cat-subhead" }, "By disposition"),
+      el("p", { class: "hint" },
+        "Hosts flagged on the registry (Hosts tab). Click a row to open it there."),
+      el("div", { class: "table-wrap" }, dispositionTable(flagged)));
+  }
+  if (rows.length) {
+    view.append(
+      el("h3", { class: "cat-subhead" }, "Compromised-Host findings"),
+      el("div", { class: "table-wrap" }, categoryTable(t, rows)));
+  } else if (flagged.length) {
+    view.append(el("p", { class: "hint" },
+      "No host-type findings yet — add one to attach the narrative and provenance "
+      + "(the action and evidence that established the compromise)."));
+  }
+}
+
+function dispositionTable(hosts) {
+  return el("table", {},
+    el("thead", {}, el("tr", {},
+      ["Ref", "Host", "Disposition", "IP", "OS", "Findings"].map((h) => el("th", {}, h)))),
+    el("tbody", {}, hosts.map((h) => el("tr", {
+      class: "host-row" + statusClass(h.status),
+      title: "open in the Hosts tab",
+      onclick: () => selectTab("hosts") },
+      el("td", { class: "mono" }, `H${h.id}`),
+      el("td", {}, el("b", {}, h.name)),
+      el("td", {}, statusPill(h.status)),
+      el("td", { class: "mono" }, h.ip || "—"),
+      el("td", {}, h.os || "—"),
+      el("td", {}, String(h.finding_count))))));
 }
 
 // Host indicators default to grouping by artifact name (the same name across

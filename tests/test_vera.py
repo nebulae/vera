@@ -1590,3 +1590,62 @@ def test_filesystem_observations_excluded_from_artifacts(case):
     case.update_finding(fs, ftype="hostindicator")
     assert "UPDATE" in [g["name"] for g in case.artifact_stacks()]
     assert case.get_finding(fs)["attrs"]["path"] == r"\VOLUME{x}\WINDOWS\UPDATE"
+
+
+# ---- v0.15.1: integrity fixes ------------------------------------------
+
+def test_compromised_hosts_csv_merges_both_sources(case, tmp_path):
+    """One CompromisedHosts.csv: host-type finding rows first, then hosts
+    flagged compromised on the registry that have no such finding (earliest
+    compromise derived from their earliest-dated linked finding)."""
+    h1 = case.add_host("RD01", ip="10.0.0.1")            # covered by a finding
+    h2 = case.add_host("RD02", ip="10.0.0.2", status="compromised")  # flag only
+    case.add_host("RD03", status="suspicious")           # never in this sheet
+    case.update_host(h1, status="compromised")
+    a = case.add_action("autorunsc", host_ids=[h1, h2])
+    case.add_finding("RD01 owned via stun.exe", ftype="host", action_id=a,
+                     event_time="2023-01-13 17:31", host_ids=[h1],
+                     attrs={"ip": "10.0.0.1", "system_type": "workstation"})
+    case.add_finding("task on RD02", ftype="hostindicator", action_id=a,
+                     event_time="2023-01-20 09:00", host_ids=[h2])
+    written = export.export(case, "csv", str(tmp_path / "out"))
+    comp = [p for p in written if p.endswith("_CompromisedHosts.csv")]
+    assert len(comp) == 1                       # exactly one writer now
+    import csv as _csv
+    rows = list(_csv.reader(open(comp[0])))
+    assert rows[0][0] == "Earliest Compromise"  # FOR508 headers win
+    body = rows[1:]
+    assert len(body) == 2                       # RD01 finding + RD02 derived
+    assert body[0][1] == "RD01" and body[0][0] == "2023-01-13 17:31"
+    rd02 = body[1]
+    assert rd02[1] == "RD02"
+    assert rd02[0] == "2023-01-20 09:00"        # derived from linked finding
+    assert "registry disposition" in rd02[4]
+    assert not any(r[1] == "RD03" for r in body)
+
+
+def test_update_action_output_rehashes(case):
+    a = case.add_action("grep evil log.txt", output="first\n")
+    before = case.get_action(a)
+    assert before["output_sha256"] == db.sha256_text("first\n")
+    case.update_action(a, output="second\n")
+    after = case.get_action(a)
+    assert after["output"] == "second\n"
+    assert after["output_sha256"] == db.sha256_text("second\n")
+    assert after["output_truncated"] == 0
+    case.update_action(a, output="")
+    assert case.get_action(a)["output_sha256"] == ""
+    # the derived integrity columns can never be set directly
+    with pytest.raises(CaseError):
+        case.update_action(a, output_sha256="ff" * 32)
+
+
+def test_exit_code_capture_and_coercion(case):
+    a = case.add_action("grep x y", exit_code="1")      # web sends strings
+    assert case.get_action(a)["exit_code"] == 1
+    case.update_action(a, exit_code="0")
+    assert case.get_action(a)["exit_code"] == 0
+    with pytest.raises(CaseError):
+        case.add_action("grep x y", exit_code="nope")
+    with pytest.raises(CaseError):
+        case.update_action(a, exit_code="nope")

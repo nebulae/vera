@@ -1873,3 +1873,51 @@ def test_wrap_requires_a_command(tmp_path):
     casep = str(tmp_path / "w3.vera")
     assert main(["init", casep, "--name", "T"]) == 0
     assert main(["--case", casep, "wrap"]) == 1
+
+
+# ---- v0.21.0: audit log ------------------------------------------------
+
+def test_audit_records_field_level_changes(case):
+    a = case.add_action("grep evil log")
+    f = case.add_finding("first title", action_id=a)
+    assert case.audit(f"F{f}") == []          # creation is not an edit
+    case.update_finding(f, title="second title", starred=1)
+    entries = case.audit(f"F{f}")
+    assert len(entries) == 1
+    ch = entries[0]["changes"]
+    assert ch["title"] == {"from": "first title", "to": "second title"}
+    assert ch["starred"]["to"] == 1
+    assert entries[0]["op"] == "update"
+    # a no-op edit writes nothing
+    case.update_finding(f, title="second title")
+    assert len(case.audit(f"F{f}")) == 1
+
+
+def test_audit_soft_delete_and_host_links(case):
+    h1 = case.add_host("RD01")
+    h2 = case.add_host("RD02")
+    a = case.add_action("x", host_ids=[h1])
+    assert case.audit(f"A{a}") == []          # creation links: no audit noise
+    case.set_action_hosts(a, [h1, h2])
+    entries = case.audit(f"A{a}")
+    assert entries[0]["changes"]["host_ids"] == {"from": [h1], "to": [h1, h2]}
+    case.soft_delete_host(h2)
+    dels = case.audit(f"H{h2}")
+    assert dels[0]["op"] == "soft_delete"
+    # unfiltered view sees everything, newest first
+    allrows = case.audit()
+    assert allrows[0]["op"] == "soft_delete"
+    with pytest.raises(CaseError):
+        case.audit("X9")
+
+
+def test_audit_cli(tmp_path, capsys):
+    casep = str(tmp_path / "a.vera")
+    assert main(["init", casep, "--name", "T"]) == 0
+    assert main(["--case", casep, "run", "echo hi"]) == 0
+    assert main(["--case", casep, "audit"]) == 0
+    assert "no edits recorded" in capsys.readouterr().out
+    assert main(["--case", casep, "edit", "A1", "--note", "reason"]) == 0
+    assert main(["--case", casep, "audit", "A1"]) == 0
+    out = capsys.readouterr().out
+    assert "A1  edited" in out and "notes" in out

@@ -527,11 +527,25 @@ def cmd_finding(args) -> int:
         else:
             host_ids = None
         hashes = _collect_hashes(args)
+        attrs = _collect_attrs(args)
+        if args.type == "lateral":
+            # movement is directional (attrs) but both endpoints also join the
+            # affected-hosts set — auto-link names that exist in the registry
+            linked = set(host_ids or [])
+            for key in ("source_host", "dest_host"):
+                name = (attrs.get(key) or "").strip()
+                if not name:
+                    continue
+                try:
+                    linked.add(case.resolve_host(name))
+                except CaseError:
+                    pass  # endpoint outside the registry (e.g. external box)
+            host_ids = sorted(linked)
         f = case.add_finding(args.title, ftype=args.type, action_id=action_id,
                              host=args.host or "", detail=args.detail or "",
                              event_time=args.time or "",
                              time_kind=args.time_kind or "",
-                             attrs=_collect_attrs(args), starred=args.star,
+                             attrs=attrs, starred=args.star,
                              host_ids=host_ids or None, hashes=hashes)
         label = types.FINDING_TYPES[args.type].label
         under = f" under {aid(action_id)}" if action_id else " (unattached)"

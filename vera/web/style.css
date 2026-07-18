@@ -859,6 +859,15 @@ td.cov-gap { color: #b45309; font-size: 12px; }
 @media (prefers-color-scheme: dark) { td.cov-gap { color: #fbbf24; } }
 .hash-file-btn { margin-left: auto; }
 
+/* lateral movement: the directional source ⟶ dest chip */
+.lateral-arrow {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  white-space: nowrap;
+}
+
 /* one-shot notice (e.g. after expanding a collection) */
 .notice {
   margin: 0 0 12px;

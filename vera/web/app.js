@@ -753,6 +753,7 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
       value: String(e.id), selected: seedEvidence === e.id ? "" : null,
     }, `E${e.id} ${e.label}`)));
   const attrsGrid = el("div", { class: "form-grid", style: "grid-column: 1 / -1;" });
+  let batchArea = null;  // non-null while "many paths" batch mode is active
 
   function renderAttrFields() {
     const t = typeInfo(typeSelect.value);
@@ -769,6 +770,32 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
       pathInp.addEventListener("input", () => {
         if (auto) nameInp.value = basename(pathInp.value.trim());
       });
+    }
+    // batch entry: paste MANY paths (one per line) → one finding per line,
+    // sharing everything else. Title placeholders {name}/{path} substitute
+    // per line; without one, " — <name>" is appended so titles stay distinct.
+    batchArea = null;
+    if (pathInp && !existing) {
+      const pathField = pathInp.closest("label") || pathInp.parentElement;
+      const ta = el("textarea", { name: "batch_paths", rows: "6",
+        placeholder: "one full path per line — every line becomes a finding",
+        style: "display:none" });
+      const btn = el("button", { class: "btn small ghost", type: "button" },
+        "⇶ many at once…");
+      let batch = false;
+      btn.addEventListener("click", () => {
+        batch = !batch;
+        ta.style.display = batch ? "" : "none";
+        pathInp.style.display = batch ? "none" : "";
+        if (nameInp) {
+          const nameField = nameInp.closest("label") || nameInp.parentElement;
+          nameField.style.display = batch ? "none" : "";
+        }
+        btn.textContent = batch ? "— single path" : "⇶ many at once…";
+        batchArea = batch ? ta : null;
+        if (batch) ta.focus();
+      });
+      pathField.append(btn, ta);
     }
     // lateral movement: typing a registry host name as source/dest auto-links
     // it into the affected-hosts set (direction lives in the attrs)
@@ -880,6 +907,31 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
         await done(existing.id);
       } else {
         payload.action_id = actionId ?? (template ? template.action_id : null) ?? null;
+        const lines = batchArea
+          ? batchArea.value.split("\n").map((s) => s.trim()).filter(Boolean)
+          : [];
+        if (batchArea && !lines.length) {
+          throw new Error("batch mode is on but no paths were pasted — "
+            + "add one per line, or switch back to a single path");
+        }
+        if (lines.length) {
+          // one finding per pasted line; everything else shared
+          let firstId = null;
+          for (const line of lines) {
+            const name = basename(line);
+            const title = /\{name\}|\{path\}/.test(payload.title)
+              ? payload.title.replaceAll("{name}", name).replaceAll("{path}", line)
+              : `${payload.title} — ${name}`;
+            const res = await api("/api/findings", { method: "POST", body: {
+              ...payload, title,
+              attrs: { ...payload.attrs, path: line, artifact: name },
+            }});
+            firstId = firstId ?? res.id;
+          }
+          await refreshInfo();
+          await done(firstId);
+          return;
+        }
         const res = await api("/api/findings", { method: "POST", body: payload });
         await uploadPending("finding", res.id, shots);
         await refreshInfo();

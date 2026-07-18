@@ -195,6 +195,29 @@ def cmd_evidence(args) -> int:
     return 0
 
 
+_AUDIT_PREFIX = {"actions": "A", "findings": "F", "evidence": "E",
+                 "hosts": "H", "collections": "C"}
+
+
+def cmd_audit(args) -> int:
+    with open_case(args) as case:
+        rows = case.audit(args.ref, limit=args.limit)
+        if not rows:
+            print("no edits recorded" + (f" for {args.ref}" if args.ref else "")
+                  + " — everything still reads as originally written")
+            return 0
+        for r in rows:
+            prefix = _AUDIT_PREFIX.get(r["table_name"], r["table_name"] + " ")
+            what = f"{prefix}{r['row_id']}"
+            if r["op"] == "soft_delete":
+                print(f"{r['at']}  {what}  soft-deleted")
+                continue
+            print(f"{r['at']}  {what}  edited:")
+            for field_name, ch in r["changes"].items():
+                print(f"    {field_name}: {ch.get('from')!r} -> {ch.get('to')!r}")
+    return 0
+
+
 def cmd_host(args) -> int:
     with open_case(args) as case:
         if args.host_cmd == "add":
@@ -1238,6 +1261,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("log", help="show the investigation tree")
     p.set_defaults(func=cmd_log)
+
+    p = sub.add_parser("audit", help="show the append-only edit history "
+                                     "(what changed after it was written)")
+    p.add_argument("ref", nargs="?",
+                   help="limit to one record: A4 / F2 / E1 / H3 / C1")
+    p.add_argument("--limit", type=int, default=200)
+    p.set_defaults(func=cmd_audit)
 
     p = sub.add_parser("show", help="show an action, finding, evidence, or host")
     p.add_argument("ref", help="A4, F2, E1, or H3")

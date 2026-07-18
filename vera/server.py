@@ -192,6 +192,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"findings": case.findings_for_host(hid),
                             "evidence": case.evidence_for_host(hid),
                             "actions": case.actions_for_host(hid)})
+            elif url.path == "/api/audit":
+                ref = (q.get("ref") or [None])[0]
+                self._json(case.audit(ref))
             elif url.path == "/api/export/md":
                 self._send(200, export.render_md(case).encode(),
                            "text/markdown; charset=utf-8")

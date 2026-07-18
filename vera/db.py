@@ -11,7 +11,7 @@ import sqlite3
 
 from . import types
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 OUTPUT_CAP = 256 * 1024        # chars of captured command output stored per action
 ATTACHMENT_CAP = 25 * 1024 * 1024  # max bytes per stored attachment
 
@@ -155,6 +155,15 @@ CREATE TABLE lead_items (
     created_at TEXT NOT NULL,
     deleted_at TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE audit_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    at         TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    row_id     INTEGER NOT NULL,
+    op         TEXT NOT NULL,                 -- update | soft_delete
+    changes    TEXT NOT NULL DEFAULT '{}'     -- {field: {"from": .., "to": ..}}
+);
+CREATE INDEX idx_audit_row ON audit_log(table_name, row_id);
 CREATE INDEX idx_leaditems_lead  ON lead_items(lead_id);
 CREATE INDEX idx_findings_action ON findings(action_id);
 CREATE INDEX idx_findings_ftype  ON findings(ftype);
@@ -452,11 +461,28 @@ def _migrate_v14(conn: sqlite3.Connection) -> None:
                          (norm, row[0]))
 
 
+def _migrate_v15(conn: sqlite3.Connection) -> None:
+    """v14 -> v15: append-only audit log — every edit and soft-delete records
+    field-level before/after, so 'was this changed after it was written?'
+    has an answer."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            at         TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            row_id     INTEGER NOT NULL,
+            op         TEXT NOT NULL,
+            changes    TEXT NOT NULL DEFAULT '{}'
+        )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_row "
+                 "ON audit_log(table_name, row_id)")
+
+
 # Applied in ascending order to bring a case up to SCHEMA_VERSION.
 MIGRATIONS = {2: _migrate_v2, 3: _migrate_v3, 4: _migrate_v4, 5: _migrate_v5,
               6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8, 9: _migrate_v9,
               10: _migrate_v10, 11: _migrate_v11, 12: _migrate_v12,
-              13: _migrate_v13, 14: _migrate_v14}
+              13: _migrate_v13, 14: _migrate_v14, 15: _migrate_v15}
 
 
 class CaseError(Exception):
@@ -612,7 +638,7 @@ class Case:
                  acquisition, notes, collection_id, _now()))
             eid = cur.lastrowid
         if host_ids:
-            self.set_evidence_hosts(eid, host_ids)
+            self.set_evidence_hosts(eid, host_ids, audit=False)
         return eid
 
     def evidence(self) -> list[dict]:
@@ -697,7 +723,7 @@ class Case:
                  parent_finding_id))
             aid = cur.lastrowid
         if host_ids:
-            self.set_action_hosts(aid, host_ids)
+            self.set_action_hosts(aid, host_ids, audit=False)
         return aid
 
     def clone_action(self, action_id: int, **overrides) -> int:
@@ -763,7 +789,7 @@ class Case:
                  json.dumps(clean_hashes), int(starred)))
             fid = cur.lastrowid
         if host_ids:
-            self.set_finding_hosts(fid, host_ids)
+            self.set_finding_hosts(fid, host_ids, audit=False)
         return fid
 
     def clone_finding(self, finding_id: int, **overrides) -> int:
@@ -876,6 +902,16 @@ class Case:
             fields["time_kind"] = _check_time_kind(fields["time_kind"])
         self._update("findings", self.FINDING_EDITABLE, finding_id, fields, "F")
 
+    def _audit(self, table: str, row_id: int, op: str, changes: dict) -> None:
+        """Append to the audit log (same transaction as the change). The log
+        is append-only: nothing in vera ever updates or deletes its rows."""
+        if op == "update" and not changes:
+            return
+        self.conn.execute(
+            "INSERT INTO audit_log(at, table_name, row_id, op, changes)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (_now(), table, row_id, op, json.dumps(changes, default=str)))
+
     def _update(self, table: str, allowed: set, row_id: int,
                 fields: dict, prefix: str) -> None:
         bad = set(fields) - allowed
@@ -884,10 +920,15 @@ class Case:
         if not fields:
             raise CaseError("nothing to update")
         self._require(table, row_id, prefix)
+        old = self.conn.execute(f"SELECT * FROM {table} WHERE id = ?",
+                                (row_id,)).fetchone()
         cols = ", ".join(f"{k} = ?" for k in fields)
         with self.conn:
             self.conn.execute(f"UPDATE {table} SET {cols} WHERE id = ?",
                               (*fields.values(), row_id))
+            self._audit(table, row_id, "update",
+                        {k: {"from": old[k], "to": v}
+                         for k, v in fields.items() if old[k] != v})
 
     def _require(self, table: str, row_id: int, prefix: str) -> None:
         row = self.conn.execute(f"SELECT id FROM {table} WHERE id = ?",
@@ -1109,6 +1150,7 @@ class Case:
         with self.conn:
             self.conn.execute("UPDATE hosts SET deleted_at = ? WHERE id = ?",
                               (_now(), host_id))
+            self._audit("hosts", host_id, "soft_delete", {})
 
     HOST_EDITABLE = {"name", "aliases", "ip", "os", "status", "system_type",
                      "criticality", "notes"}
@@ -1135,10 +1177,15 @@ class Case:
             fields["name"] = name
         if not fields:
             raise CaseError("nothing to update")
+        old = self.conn.execute("SELECT * FROM hosts WHERE id = ?",
+                                (host_id,)).fetchone()
         cols = ", ".join(f"{k} = ?" for k in fields)
         with self.conn:
             self.conn.execute(f"UPDATE hosts SET {cols} WHERE id = ?",
                               (*fields.values(), host_id))
+            self._audit("hosts", host_id, "update",
+                        {k: {"from": old[k], "to": v}
+                         for k, v in fields.items() if old[k] != v})
 
     def host_finding_counts(self) -> dict[int, int]:
         return {r["host_id"]: r["n"] for r in self.conn.execute(
@@ -1217,7 +1264,7 @@ class Case:
                 (name, tool, operator, collected_at, scope, notes, _now()))
             cid = cur.lastrowid
         if host_ids:
-            self.set_collection_hosts(cid, host_ids)
+            self.set_collection_hosts(cid, host_ids, audit=False)
         return cid
 
     def collections(self) -> list[dict]:
@@ -1291,25 +1338,35 @@ class Case:
                   "collection_hosts": "collection_id"}
 
     def _set_host_links(self, table: str, owner_col: str, owner_table: str,
-                        owner_id: int, host_ids: list[int], prefix: str) -> None:
+                        owner_id: int, host_ids: list[int], prefix: str,
+                        audit: bool = True) -> None:
         self._require(owner_table, owner_id, prefix)
         for hid in host_ids:
             self._require("hosts", hid, "H")
+        old_ids = sorted(r[0] for r in self.conn.execute(
+            f"SELECT host_id FROM {table} WHERE {owner_col} = ?", (owner_id,)))
         with self.conn:
             self.conn.execute(f"DELETE FROM {table} WHERE {owner_col} = ?",
                               (owner_id,))
             self.conn.executemany(
                 f"INSERT OR IGNORE INTO {table}({owner_col}, host_id) VALUES (?, ?)",
                 [(owner_id, hid) for hid in host_ids])
+            new_ids = sorted(set(host_ids))
+            if audit and new_ids != old_ids:
+                # audited against the OWNER row (host attribution is evidence)
+                self._audit(owner_table, owner_id, "update",
+                            {"host_ids": {"from": old_ids, "to": new_ids}})
 
-    def set_finding_hosts(self, finding_id: int, host_ids: list[int]) -> None:
+    def set_finding_hosts(self, finding_id: int, host_ids: list[int],
+                          audit: bool = True) -> None:
         self._set_host_links("finding_hosts", "finding_id", "findings",
-                             finding_id, host_ids, "F")
+                             finding_id, host_ids, "F", audit=audit)
 
-    def set_evidence_hosts(self, evidence_id: int, host_ids: list[int]) -> None:
+    def set_evidence_hosts(self, evidence_id: int, host_ids: list[int],
+                           audit: bool = True) -> None:
         old = set(self.evidence_host_ids(evidence_id))
         self._set_host_links("evidence_hosts", "evidence_id", "evidence",
-                             evidence_id, host_ids, "E")
+                             evidence_id, host_ids, "E", audit=audit)
         if old == set(host_ids):
             return
         # steps derive their hosts from the evidence they examine: any step
@@ -1321,14 +1378,16 @@ class Case:
                 self._set_host_links("action_hosts", "action_id", "actions",
                                      r["id"], host_ids, "A")
 
-    def set_action_hosts(self, action_id: int, host_ids: list[int]) -> None:
+    def set_action_hosts(self, action_id: int, host_ids: list[int],
+                         audit: bool = True) -> None:
         self._set_host_links("action_hosts", "action_id", "actions",
-                             action_id, host_ids, "A")
+                             action_id, host_ids, "A", audit=audit)
 
-    def set_collection_hosts(self, collection_id: int, host_ids: list[int]) -> None:
+    def set_collection_hosts(self, collection_id: int, host_ids: list[int],
+                             audit: bool = True) -> None:
         old = set(self.collection_host_ids(collection_id))
         self._set_host_links("collection_hosts", "collection_id", "collections",
-                             collection_id, host_ids, "C")
+                             collection_id, host_ids, "C", audit=audit)
         if old == set(host_ids):
             return
         # evidence in the collection follows the collection's host set — but
@@ -1512,6 +1571,7 @@ class Case:
         with self.conn:
             self.conn.execute("UPDATE lead_items SET deleted_at = ? WHERE id = ?",
                               (_now(), item_id))
+            self._audit("lead_items", item_id, "soft_delete", {})
 
     # -- attachments --------------------------------------------------------
 
@@ -1574,6 +1634,38 @@ class Case:
         with self.conn:
             self.conn.execute("UPDATE attachments SET deleted_at = ? WHERE id = ?",
                               (_now(), attach_id))
+            self._audit("attachments", attach_id, "soft_delete", {})
+
+    # -- audit trail --------------------------------------------------------
+
+    def audit(self, ref: str | None = None, limit: int = 200) -> list[dict]:
+        """Read the append-only edit history, newest first. `ref` filters to
+        one row (A4 / F2 / E1 / H3 / C1). There is deliberately NO write API
+        beyond _audit and nothing that updates or deletes log rows."""
+        q = ("SELECT id, at, table_name, row_id, op, changes FROM audit_log")
+        params: tuple = ()
+        if ref:
+            kind = ref[:1].upper()
+            table = AUDIT_TABLES.get(kind)
+            if not table or not ref[1:].isdigit():
+                known = ", ".join(f"{k}#" for k in AUDIT_TABLES)
+                raise CaseError(f"audit expects a ref like {known}, got {ref!r}")
+            q += " WHERE table_name = ? AND row_id = ?"
+            params = (table, int(ref[1:]))
+        q += " ORDER BY id DESC LIMIT ?"
+        out = []
+        for r in self.conn.execute(q, (*params, limit)):
+            d = dict(r)
+            try:
+                d["changes"] = json.loads(d["changes"])
+            except json.JSONDecodeError:
+                d["changes"] = {}
+            out.append(d)
+        return out
+
+
+AUDIT_TABLES = {"A": "actions", "F": "findings", "E": "evidence",
+                "H": "hosts", "C": "collections"}
 
 
 def resolve_ref(ref: str) -> tuple[str, int]:

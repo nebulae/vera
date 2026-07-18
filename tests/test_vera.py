@@ -1681,10 +1681,10 @@ def test_migration_v13_adds_custody_and_backs_up(tmp_path):
             conn.execute(f"ALTER TABLE evidence DROP COLUMN {col}")
         conn.execute("UPDATE case_meta SET value='12' WHERE key='schema_version'")
     conn.close()
-    with Case(p) as c2:  # migrates 12 -> 13
+    with Case(p) as c2:  # migrates 12 -> current
         row = c2.evidence()[0]
         assert row["acquired_by"] == "" and row["acquisition"] == ""
-        assert c2.meta()["schema_version"] == "13"
+        assert c2.meta()["schema_version"] == str(db.SCHEMA_VERSION)
     assert os.path.exists(p + ".pre-v12")   # auto-backup before migrating
     # the backup still opens and holds the old schema's data
     bconn = sqlite3.connect(p + ".pre-v12")
@@ -1717,3 +1717,78 @@ def test_evidence_csv_sheet(case, tmp_path):
     ev_csv = next(p for p in written if p.endswith("_Evidence.csv"))
     text = open(ev_csv).read()
     assert "Acquired By" in text and "trinity" in text and "KAPE" in text
+
+
+# ---- v0.17.0: event-time normalization + time_kind ---------------------
+
+def test_normalize_event_time():
+    n = db.normalize_event_time
+    assert n("") == ""
+    assert n("2023-01-13 17:31") == "2023-01-13 17:31"
+    assert n("2023-01-13T17:31:05") == "2023-01-13 17:31:05"
+    assert n("2023-01-13 17:31:05 UTC") == "2023-01-13 17:31:05"
+    assert n("2023-01-13 17:31:05Z") == "2023-01-13 17:31:05"
+    assert n("01/13/2023 17:31:05") == "2023-01-13 17:31:05"   # EZ-tool US
+    assert n("2023-01-13 17:31:05.0000000") == "2023-01-13 17:31:05"
+    assert n("2023-01-13") == "2023-01-13"            # precision preserved
+    assert n("2023-1-3 7:05") == "2023-01-03 07:05"   # zero-padded
+    with pytest.raises(CaseError):
+        n("last tuesday")
+    with pytest.raises(CaseError):
+        n("13/13/2023 17:31")
+
+
+def test_time_kind_roundtrip_and_validation(case):
+    a = case.add_action("pecmd -f X.pf")
+    f = case.add_finding("stun.exe last run", action_id=a,
+                         event_time="2023-01-13T17:31Z", time_kind="executed")
+    got = case.get_finding(f)
+    assert got["event_time"] == "2023-01-13 17:31"
+    assert got["time_kind"] == "executed"
+    case.update_finding(f, time_kind="modified")
+    assert case.get_finding(f)["time_kind"] == "modified"
+    case.update_finding(f, time_kind="")
+    assert case.get_finding(f)["time_kind"] == ""
+    with pytest.raises(CaseError):
+        case.add_finding("x", time_kind="guessed")
+    with pytest.raises(CaseError):
+        case.update_finding(f, event_time="whenever")
+    # clone carries the semantics
+    case.update_finding(f, time_kind="executed")
+    c = case.clone_finding(f, title="copy")
+    assert case.get_finding(c)["time_kind"] == "executed"
+
+
+def test_migration_v14_normalizes_existing(tmp_path):
+    p = str(tmp_path / "old.vera")
+    with Case(p, create=True) as c:
+        a = c.add_action("x")
+        c.add_finding("ok already", action_id=a, event_time="2023-01-20 12:30")
+    conn = sqlite3.connect(p)
+    with conn:
+        conn.execute("ALTER TABLE findings DROP COLUMN time_kind")
+        # plant a legacy-format row + an unparseable one, then rewind schema
+        conn.execute("INSERT INTO findings(action_id, created_at, event_time,"
+                     " title) VALUES (1, 'x', '01/20/2023 12:45', 'legacy us')")
+        conn.execute("INSERT INTO findings(action_id, created_at, event_time,"
+                     " title) VALUES (1, 'x', 'circa january', 'vague')")
+        conn.execute("UPDATE case_meta SET value='13' WHERE key='schema_version'")
+    conn.close()
+    with Case(p) as c2:
+        by_title = {f["title"]: f for f in c2.findings()}
+        assert by_title["ok already"]["event_time"] == "2023-01-20 12:30"
+        assert by_title["legacy us"]["event_time"] == "2023-01-20 12:45"
+        assert by_title["vague"]["event_time"] == "circa january"  # untouched
+        assert by_title["vague"]["time_kind"] == ""
+
+
+def test_timeline_csv_has_time_meaning(case, tmp_path):
+    a = case.add_action("x")
+    case.add_finding("ran evil", action_id=a, event_time="2023-01-13 17:31",
+                     time_kind="executed")
+    written = export.export(case, "csv", str(tmp_path / "out"))
+    tl = next(p for p in written if p.endswith("_Timeline.csv"))
+    import csv as _csv
+    rows = list(_csv.reader(open(tl)))
+    assert rows[0] == ["Date / Time", "Host Name", "Activity", "Time Meaning"]
+    assert rows[-1][3] == "executed"

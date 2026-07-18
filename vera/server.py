@@ -260,6 +260,7 @@ class Handler(BaseHTTPRequestHandler):
                     host=body.get("host", ""),
                     detail=body.get("detail", ""),
                     event_time=body.get("event_time", ""),
+                    time_kind=body.get("time_kind", ""),
                     attrs=body.get("attrs") or {},
                     hashes=body.get("hashes") or {},
                     starred=bool(body.get("starred")),

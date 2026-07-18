@@ -14,6 +14,14 @@ const STATUS_OPTS = [["", "—"], ["clean", "clean"],
   ["suspicious", "suspicious"], ["compromised", "compromised"]];
 const statusClass = (s) => (s ? " st-" + s : "");
 
+// what a finding's event_time MEANS (mirrors db.TIME_KINDS) — a shimcache
+// timestamp is a modification time, not an execution time
+const TIME_KINDS = [["", "— unspecified —"], ["executed", "executed"],
+  ["created", "created"], ["modified", "modified"], ["accessed", "accessed"],
+  ["logged", "logged"], ["observed", "observed"]];
+const timeWithKind = (f) =>
+  f.event_time + (f.time_kind ? ` (${f.time_kind})` : "");
+
 /* ---------- tiny DOM helpers ---------- */
 
 function el(tag, attrs = {}, ...children) {
@@ -805,11 +813,19 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
       el("span", {}, "What did you find?"), starBtn),
     textInput("title", "e.g. rundll32 spawned from wmiprvse", seed ? seed.title : ""));
 
+  // what the event_time MEANS — shimcache = modified, prefetch = executed …
+  const timeKindSel = el("select", { name: "time_kind" },
+    TIME_KINDS.map(([v, label]) => el("option", {
+      value: v, selected: (seed ? seed.time_kind || "" : "") === v ? "" : null,
+    }, label)));
+
   const fieldsEls = [
     titleField,
     field("Type", typeSelect),
-    field("Event time (in the incident)", textInput("event_time", "e.g. 2026-07-01 14:22",
-      seed ? seed.event_time : "")),
+    field("Event time (in the incident, UTC)",
+      textInput("event_time", "e.g. 2026-07-01 14:22",
+        seed ? seed.event_time : "")),
+    field("Time means", timeKindSel),
     state.info.evidence.length ? field("Evidence it came from", evSelect) : null,
     attrsGrid,
     el("div", { class: "field wide" }, picker.el),
@@ -837,6 +853,7 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
         title: data.get("title").trim(),
         ftype: data.get("ftype"),
         event_time: data.get("event_time").trim(),
+        time_kind: data.get("time_kind") || "",
         detail: data.get("detail").trim(),
         attrs,
         hashes,
@@ -1200,7 +1217,7 @@ function findingCard(f) {
     collapsed && nAct ? el("span", { class: "meta find-count", title: "follow-up actions" },
       `↳ ${nAct}`) : null,
     leadProgress,
-    f.event_time ? el("span", { class: "meta node-time" }, f.event_time) : null));
+    f.event_time ? el("span", { class: "meta node-time" }, timeWithKind(f)) : null));
   if (collapsed) return card;
 
   // a lead is a worklist, not an indicator — don't show host-indicator-style
@@ -1547,14 +1564,19 @@ async function renderTimeline(view) {
   }
   const table = el("table", {},
     el("thead", {}, el("tr", {},
-      ["Date / Time", "Host", "Activity", "Type", "Ref"].map((h) => el("th", {}, h)))),
+      ["Date / Time", "Means", "Host", "Activity", "Type", "Ref"].map((h) => el("th", {}, h)))),
     el("tbody", {}, rows.map((f) => el("tr", {},
       el("td", { class: "mono" }, f.event_time),
+      el("td", { class: "meta" }, f.time_kind || "—"),
       el("td", {}, f.host),
       el("td", {}, (f.attrs && f.attrs.activity) || f.title),
       el("td", {}, typeInfo(f.ftype).label),
       el("td", {}, refLink(`F${f.id}`, `node-F${f.id}`))))));
-  view.replaceChildren(el("div", { class: "table-wrap" }, table));
+  view.replaceChildren(
+    el("p", { class: "hint" },
+      "All event times are UTC. “Means” records what the timestamp is — a "
+      + "shimcache time is a file modification, not an execution."),
+    el("div", { class: "table-wrap" }, table));
 }
 
 /* ---------- category views ---------- */

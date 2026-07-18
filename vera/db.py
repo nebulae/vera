@@ -6,11 +6,12 @@ import datetime as _dt
 import hashlib
 import json
 import os
+import re
 import sqlite3
 
 from . import types
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 OUTPUT_CAP = 256 * 1024        # chars of captured command output stored per action
 ATTACHMENT_CAP = 25 * 1024 * 1024  # max bytes per stored attachment
 
@@ -24,6 +25,12 @@ HASH_SPECS = {"md5": 32, "sha1": 40, "sha256": 64}
 
 # Host disposition. '' = not yet triaged; the Comp. Hosts view derives from this.
 HOST_STATUSES = ("", "clean", "suspicious", "compromised")
+
+# What a finding's event_time MEANS — a ShimCache time is a file-modification
+# time, not an execution time; mixing those up on a timeline is an analytic
+# error. '' = unspecified.
+TIME_KINDS = ("", "executed", "created", "modified", "accessed", "logged",
+              "observed")
 
 # vera never purges rows. "Deleting" sets deleted_at; queries filter it out.
 
@@ -95,6 +102,7 @@ CREATE TABLE findings (
     evidence_id INTEGER REFERENCES evidence(id),
     created_at TEXT NOT NULL,
     event_time TEXT NOT NULL DEFAULT '',
+    time_kind  TEXT NOT NULL DEFAULT '',
     title      TEXT NOT NULL,
     detail     TEXT NOT NULL DEFAULT '',
     ftype      TEXT NOT NULL DEFAULT 'note',
@@ -374,6 +382,47 @@ def _migrate_v12(conn: sqlite3.Connection) -> None:
         "WHERE evidence_id IS NULL AND action_id IS NOT NULL")
 
 
+# Accepted incoming event-time shapes (ISO-ish + the US format EZ tools emit).
+_ET_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+               "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M",
+               "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y")
+
+
+def normalize_event_time(value: str) -> str:
+    """Canonicalize an incident timestamp for reliable sorting/correlation.
+
+    Case convention: ALL event times are UTC — a trailing 'UTC'/'Z' is
+    stripped, fractional seconds dropped. Precision is preserved, never
+    invented: date-only stays date-only, minutes stay minutes. Raises on
+    anything unparseable so a stray local-format time can't silently poison
+    the timeline."""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    v = re.sub(r"\s*(UTC|Z)$", "", v, flags=re.IGNORECASE).strip()
+    v = re.sub(r"(\d{2}:\d{2}(?::\d{2})?)\.\d+", r"\1", v)
+    for fmt in _ET_FORMATS:
+        try:
+            parsed = _dt.datetime.strptime(v, fmt)
+        except ValueError:
+            continue
+        if "%H" not in fmt:
+            return parsed.strftime("%Y-%m-%d")
+        if "%S" in fmt:
+            return parsed.strftime("%Y-%m-%d %H:%M:%S")
+        return parsed.strftime("%Y-%m-%d %H:%M")
+    raise CaseError(f"cannot parse event time {value!r} — use "
+                    "YYYY-MM-DD [HH:MM[:SS]] (all event times are UTC)")
+
+
+def _check_time_kind(kind: str) -> str:
+    k = (kind or "").strip().lower()
+    if k not in TIME_KINDS:
+        known = ", ".join(t or "unspecified" for t in TIME_KINDS)
+        raise CaseError(f"unknown time kind {kind!r} (one of: {known})")
+    return k
+
+
 def _migrate_v13(conn: sqlite3.Connection) -> None:
     """v12 -> v13: chain-of-custody fields on evidence — who acquired it,
     when, and how (the acquisition method/tool)."""
@@ -384,11 +433,30 @@ def _migrate_v13(conn: sqlite3.Connection) -> None:
                 f"ALTER TABLE evidence ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
 
 
+def _migrate_v14(conn: sqlite3.Connection) -> None:
+    """v13 -> v14: time_kind (what the event_time MEANS) on findings, and a
+    best-effort normalization pass over existing event_times. Values that
+    don't parse are left untouched — a migration never destroys data."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
+    if "time_kind" not in cols:
+        conn.execute(
+            "ALTER TABLE findings ADD COLUMN time_kind TEXT NOT NULL DEFAULT ''")
+    for row in conn.execute(
+            "SELECT id, event_time FROM findings WHERE event_time != ''").fetchall():
+        try:
+            norm = normalize_event_time(row[1])
+        except CaseError:
+            continue
+        if norm != row[1]:
+            conn.execute("UPDATE findings SET event_time = ? WHERE id = ?",
+                         (norm, row[0]))
+
+
 # Applied in ascending order to bring a case up to SCHEMA_VERSION.
 MIGRATIONS = {2: _migrate_v2, 3: _migrate_v3, 4: _migrate_v4, 5: _migrate_v5,
               6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8, 9: _migrate_v9,
               10: _migrate_v10, 11: _migrate_v11, 12: _migrate_v12,
-              13: _migrate_v13}
+              13: _migrate_v13, 14: _migrate_v14}
 
 
 class CaseError(Exception):
@@ -666,9 +734,12 @@ class Case:
                     attrs: dict | None = None, starred: bool = False,
                     host_ids: list[int] | None = None,
                     hashes: dict | None = None,
-                    evidence_id: int | None = None) -> int:
+                    evidence_id: int | None = None,
+                    time_kind: str = "") -> int:
         if not title.strip():
             raise CaseError("finding title must not be empty")
+        event_time = normalize_event_time(event_time)
+        time_kind = _check_time_kind(time_kind)
         if action_id is not None:
             self._require("actions", action_id, "A")
         # a finding carries the evidence it came from — inherited from its
@@ -684,10 +755,12 @@ class Case:
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO findings(action_id, evidence_id, created_at,"
-                " event_time, title, detail, ftype, host, attrs, hashes, starred)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (action_id, evidence_id, _now(), event_time, title, detail, ftype,
-                 host, json.dumps(attrs), json.dumps(clean_hashes), int(starred)))
+                " event_time, time_kind, title, detail, ftype, host, attrs,"
+                " hashes, starred)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (action_id, evidence_id, _now(), event_time, time_kind, title,
+                 detail, ftype, host, json.dumps(attrs),
+                 json.dumps(clean_hashes), int(starred)))
             fid = cur.lastrowid
         if host_ids:
             self.set_finding_hosts(fid, host_ids)
@@ -708,6 +781,7 @@ class Case:
             "host": src.get("host", ""),
             "detail": src.get("detail", ""),
             "event_time": src.get("event_time", ""),
+            "time_kind": src.get("time_kind", ""),
             "attrs": dict(src.get("attrs") or {}),
             "hashes": dict(src.get("hashes") or {}),
             "host_ids": [h["id"] for h in src.get("affected_hosts", [])] or None,
@@ -736,7 +810,8 @@ class Case:
                        "output", "exit_code", "performed_at", "evidence_id",
                        "collection_id", "parent_finding_id"}
     FINDING_EDITABLE = {"title", "detail", "ftype", "host", "event_time",
-                        "attrs", "hashes", "starred", "action_id", "evidence_id"}
+                        "time_kind", "attrs", "hashes", "starred", "action_id",
+                        "evidence_id"}
     EVIDENCE_EDITABLE = {"label", "kind", "source", "sha256", "notes",
                          "collection_id", "acquired_by", "acquired_at",
                          "acquisition"}
@@ -795,6 +870,10 @@ class Case:
             fields["hashes"] = json.dumps(normalize_hashes(fields["hashes"]))
         if fields.get("evidence_id") is not None:
             self._require("evidence", fields["evidence_id"], "E")
+        if "event_time" in fields:
+            fields["event_time"] = normalize_event_time(fields["event_time"])
+        if "time_kind" in fields:
+            fields["time_kind"] = _check_time_kind(fields["time_kind"])
         self._update("findings", self.FINDING_EDITABLE, finding_id, fields, "F")
 
     def _update(self, table: str, allowed: set, row_id: int,

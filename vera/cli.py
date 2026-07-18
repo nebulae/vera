@@ -530,6 +530,7 @@ def cmd_finding(args) -> int:
         f = case.add_finding(args.title, ftype=args.type, action_id=action_id,
                              host=args.host or "", detail=args.detail or "",
                              event_time=args.time or "",
+                             time_kind=args.time_kind or "",
                              attrs=_collect_attrs(args), starred=args.star,
                              host_ids=host_ids or None, hashes=hashes)
         label = types.FINDING_TYPES[args.type].label
@@ -748,8 +749,8 @@ def cmd_show(args) -> int:
             star = " ★" if f["starred"] else ""
             print(f"{fid(f['id'])} [{ft.label if ft else f['ftype']}]{star}  {f['title']}")
             for key, label in (("host", "host"), ("event_time", "event time"),
-                               ("detail", "detail")):
-                if f[key]:
+                               ("time_kind", "time means"), ("detail", "detail")):
+                if f.get(key):
                     print(f"  {label}: {f[key]}")
             for k, v in f["attrs"].items():
                 if v:
@@ -872,6 +873,9 @@ def cmd_edit(args) -> int:
                 fields["host"] = args.host
             if args.time is not None:
                 fields["event_time"] = args.time
+            if args.time_kind is not None:
+                fields["time_kind"] = ("" if args.time_kind == "none"
+                                       else args.time_kind)
             if args.type is not None:
                 if args.type not in types.FINDING_TYPES:
                     raise CaseError(f"unknown type {args.type!r}")
@@ -1154,7 +1158,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "space list, must already exist. Omit to inherit the "
                             "action's host(s). 2+ stacks the finding across hosts.")
         p.add_argument("--time", help="when it happened in the incident "
-                                      "(drives the timeline)")
+                                      "(drives the timeline; UTC)")
+        p.add_argument("--time-kind", dest="time_kind",
+                       choices=[k for k in db.TIME_KINDS if k],
+                       help="what the time MEANS (a shimcache time is "
+                            "'modified', not 'executed')")
         p.add_argument("-d", "--detail", help="longer description")
         p.add_argument("--md5", help="MD5 of the file this finding is about")
         p.add_argument("--sha1", help="SHA-1 of the file")
@@ -1181,6 +1189,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--detail")
     p.add_argument("--host")
     p.add_argument("--time", help="performed-at (action) / event time (finding)")
+    p.add_argument("--time-kind", dest="time_kind",
+                   choices=[k for k in db.TIME_KINDS if k] + ["none"],
+                   help="what a finding's event time means ('none' to clear)")
     p.add_argument("--command")
     p.add_argument("--tool")
     p.add_argument("-t", "--type", help="change finding type")

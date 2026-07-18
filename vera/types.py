@@ -190,12 +190,15 @@ _register(FindingType(
 
 
 TIMELINE_CSV_NAME = "Timeline"
-TIMELINE_CSV_HEADERS = ("Date / Time", "Host Name", "Activity")
+# trailing column added past the FOR508 set: what the timestamp MEANS
+# (executed/created/modified/…) — leading columns stay spreadsheet-compatible
+TIMELINE_CSV_HEADERS = ("Date / Time", "Host Name", "Activity", "Time Meaning")
 
 
 def timeline_csv_row(f: dict) -> list:
     activity = _attrs(f).get("activity") or f.get("title", "")
-    return [f.get("event_time", ""), f.get("host", ""), activity]
+    return [f.get("event_time", ""), f.get("host", ""), activity,
+            f.get("time_kind", "")]
 
 
 def basename(path: str) -> str:

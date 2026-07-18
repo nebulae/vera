@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import mimetypes
 import os
+import shlex
 import subprocess
 import sys
 
@@ -410,6 +411,35 @@ def _action_host_ids(case: Case, hosts_arg, evidence_id) -> list[int]:
     return []
 
 
+def _record_command(args, command: str, output: str,
+                    exit_code: int | None) -> int:
+    """Log an executed/typed command as an action (shared by run and wrap)."""
+    with open_case(args) as case:
+        parent = None
+        if args.from_finding:
+            kind, parent = db.resolve_ref(args.from_finding)
+            if kind != "F":
+                raise CaseError("--from expects a finding reference like F3")
+        evidence_id = (case.resolve_evidence(args.evidence)
+                       if args.evidence else None)
+        collection_id = (case.resolve_collection(args.collection)
+                         if args.collection else None)
+        host_ids = _action_host_ids(case, args.hosts, evidence_id)
+        a = case.add_action(command, host=args.host or "",
+                            tool=args.tool or "", evidence_id=evidence_id,
+                            collection_id=collection_id, output=output,
+                            exit_code=exit_code, notes=args.note or "",
+                            parent_finding_id=parent, host_ids=host_ids)
+        where = f" (follow-up to {fid(parent)})" if parent else ""
+        captured = f", {len(output)} chars captured" if output else ""
+        on = f" on {len(host_ids)} host(s)" if host_ids else ""
+        print(f"{aid(a)} recorded{where}{captured}{on}")
+        if exit_code not in (None, 0):
+            print(f"   exit code {exit_code}")
+        _attach_files(case, "action", a, args.shot, "output")
+    return 0
+
+
 def cmd_run(args) -> int:
     output, exit_code = "", None
     if args.execute:
@@ -423,31 +453,34 @@ def cmd_run(args) -> int:
             sys.stderr.write(proc.stderr)
     else:
         output = _read_piped_stdin()
+    return _record_command(args, args.command, output, exit_code)
 
-    with open_case(args) as case:
-        parent = None
-        if args.from_finding:
-            kind, parent = db.resolve_ref(args.from_finding)
-            if kind != "F":
-                raise CaseError("--from expects a finding reference like F3")
-        evidence_id = (case.resolve_evidence(args.evidence)
-                       if args.evidence else None)
-        collection_id = (case.resolve_collection(args.collection)
-                         if args.collection else None)
-        host_ids = _action_host_ids(case, args.hosts, evidence_id)
-        a = case.add_action(args.command, host=args.host or "",
-                            tool=args.tool or "", evidence_id=evidence_id,
-                            collection_id=collection_id, output=output,
-                            exit_code=exit_code, notes=args.note or "",
-                            parent_finding_id=parent, host_ids=host_ids)
-        where = f" (follow-up to {fid(parent)})" if parent else ""
-        captured = f", {len(output)} chars captured" if output else ""
-        on = f" on {len(host_ids)} host(s)" if host_ids else ""
-        print(f"{aid(a)} recorded{where}{captured}{on}")
-        if exit_code not in (None, 0):
-            print(f"   exit code {exit_code}")
-        _attach_files(case, "action", a, args.shot, "output")
-    return 0
+
+def cmd_wrap(args) -> int:
+    """Run a command AND log it in one go: `vera wrap [--ev E3] -- cmd args…`.
+
+    The action records the exact command, its combined output (teed live to
+    the terminal), exit code, output hash, and timestamp — a contemporaneous
+    note that costs nothing beyond the prefix. Single quoted argument =
+    passed to the shell as-is (use that for pipelines); multiple arguments
+    are re-quoted with shlex so `vera wrap -- grep "two words" file` works."""
+    tokens = list(args.cmd or [])
+    if tokens and tokens[0] == "--":
+        tokens = tokens[1:]
+    if not tokens:
+        raise CaseError(
+            "give a command: vera wrap [--ev E3] -- <cmd> [args…] "
+            "(quote the whole thing if it contains a pipeline)")
+    command = tokens[0] if len(tokens) == 1 else shlex.join(tokens)
+    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            errors="replace")
+    lines: list[str] = []
+    for line in proc.stdout:            # tee: show live AND capture
+        sys.stdout.write(line)
+        lines.append(line)
+    proc.wait()
+    return _record_command(args, command, "".join(lines), proc.returncode)
 
 
 def cmd_manual(args) -> int:
@@ -1107,26 +1140,40 @@ def build_parser() -> argparse.ArgumentParser:
                                         "nobody has examined yet")
     p.set_defaults(func=cmd_coverage)
 
+    def _step_context_flags(p):
+        """Context flags shared by every command-step logger (run / wrap)."""
+        p.add_argument("--hosts", action="append", metavar="LIST",
+                       help="host(s) examined — registry refs (RD03 / H3), "
+                            "comma/space list, must already exist "
+                            "('vera host add' first)")
+        p.add_argument("--host", help=argparse.SUPPRESS)  # deprecated free-text
+        p.add_argument("--tool", help="tool name (default: first word of command)")
+        p.add_argument("--evidence", "--ev", metavar="REF",
+                       help="evidence used (E2 or label substring)")
+        p.add_argument("--collection", metavar="REF",
+                       help="collection/batch this action ran against (C2 or name)")
+        p.add_argument("--from", dest="from_finding", metavar="F#",
+                       help="finding that prompted this action")
+        p.add_argument("--note")
+        p.add_argument("--shot", action="append", metavar="FILE",
+                       help="screenshot to attach as output (repeatable)")
+
     p = sub.add_parser("run", help="log a command/tool you ran "
                                    "(pipe its output in to capture it)")
     p.add_argument("command", help="the exact command line")
     p.add_argument("-x", "--execute", action="store_true",
                    help="have vera execute the command and capture its output")
-    p.add_argument("--hosts", action="append", metavar="LIST",
-                   help="host(s) examined — registry refs (RD03 / H3), comma/space "
-                        "list, must already exist ('vera host add' first)")
-    p.add_argument("--host", help=argparse.SUPPRESS)  # deprecated free-text label
-    p.add_argument("--tool", help="tool name (default: first word of command)")
-    p.add_argument("--evidence", metavar="REF",
-                   help="evidence used (E2 or label substring)")
-    p.add_argument("--collection", metavar="REF",
-                   help="collection/batch this action ran against (C2 or name)")
-    p.add_argument("--from", dest="from_finding", metavar="F#",
-                   help="finding that prompted this action")
-    p.add_argument("--note")
-    p.add_argument("--shot", action="append", metavar="FILE",
-                   help="screenshot to attach as output (repeatable)")
+    _step_context_flags(p)
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("wrap", help="run a command AND log it in one go — "
+                                    "output, exit code, hash, timestamp all "
+                                    "captured (put the command after --)")
+    _step_context_flags(p)
+    p.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- command …",
+                   help="the command to run; quote the whole thing if it "
+                        "contains a pipeline")
+    p.set_defaults(func=cmd_wrap)
 
     p = sub.add_parser("manual", help="log a GUI/tool step with no command line "
                                       "(e.g. Registry Explorer, Timeline Explorer)")

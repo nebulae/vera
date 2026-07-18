@@ -1832,3 +1832,44 @@ def test_lateral_cli_autolinks_registry_hosts(tmp_path):
     with Case(casep) as c:
         f2 = c.findings("lateral")[1]
         assert {h["name"] for h in f2["affected_hosts"]} == {"RD01"}
+
+
+# ---- v0.19.0: vera wrap ------------------------------------------------
+
+def test_wrap_records_command_output_exit(tmp_path, capsys):
+    casep = str(tmp_path / "w.vera")
+    assert main(["init", casep, "--name", "T"]) == 0
+    capsys.readouterr()
+    assert main(["--case", casep, "wrap", "--", "echo", "two words"]) == 0
+    out = capsys.readouterr().out
+    assert "two words" in out           # teed live
+    assert "A1 recorded" in out
+    with Case(casep) as c:
+        a = c.get_action(1)
+        assert a["command"] == "echo 'two words'"   # shlex re-quoted
+        assert a["output"].strip() == "two words"
+        assert a["exit_code"] == 0
+        assert a["output_sha256"] == db.sha256_text(a["output"])
+
+
+def test_wrap_pipeline_and_failure(tmp_path, capsys):
+    casep = str(tmp_path / "w2.vera")
+    assert main(["init", casep, "--name", "T"]) == 0
+    # single quoted arg goes to the shell as-is: pipelines work
+    assert main(["--case", casep, "wrap", "--",
+                 "printf 'a\\nb\\n' | grep -c ."]) == 0
+    with Case(casep) as c:
+        assert c.get_action(1)["output"].strip() == "2"
+    # a failing command still logs, with its exit code — a negative result
+    assert main(["--case", casep, "wrap", "--", "grep", "absent",
+                 os.devnull]) == 0
+    out = capsys.readouterr().out
+    assert "exit code 1" in out
+    with Case(casep) as c:
+        assert c.get_action(2)["exit_code"] == 1
+
+
+def test_wrap_requires_a_command(tmp_path):
+    casep = str(tmp_path / "w3.vera")
+    assert main(["init", casep, "--name", "T"]) == 0
+    assert main(["--case", casep, "wrap"]) == 1

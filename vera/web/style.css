@@ -859,6 +859,14 @@ td.cov-gap { color: #b45309; font-size: 12px; }
 @media (prefers-color-scheme: dark) { td.cov-gap { color: #fbbf24; } }
 .hash-file-btn { margin-left: auto; }
 
+/* combined step+finding modal: the optional finding section */
+.qf-wrap {
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+  margin-top: 4px;
+}
+.qf-body { margin-top: 10px; }
+
 /* lateral movement: the directional source ⟶ dest chip */
 .lateral-arrow {
   font-size: 12px;

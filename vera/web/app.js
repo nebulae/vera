@@ -954,6 +954,55 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
   evSelect.addEventListener("change", syncHostNote);
   syncHostNote();
 
+  // ---- optional inline finding: log the step AND what it produced in ONE
+  // save (skip it for a null result — that's a finding-less step, and that
+  // record matters too). Only on new steps; edits keep the separate modal.
+  function quickFindingSection() {
+    const typeSel = el("select", { name: "qf_type" },
+      state.info.types.filter((t) => t.key !== "lead").map((t) =>
+        el("option", { value: t.key }, t.label)));
+    const attrs = el("div", { class: "form-grid", style: "grid-column:1/-1" });
+    const renderAttrs = () => {
+      const t = typeInfo(typeSel.value);
+      attrs.replaceChildren(...t.fields.map((f) =>
+        field(f.label, textInput(`qfattr:${f.key}`, f.hint || ""))));
+      const pathInp = attrs.querySelector('[name="qfattr:path"]');
+      const nameInp = attrs.querySelector('[name="qfattr:artifact"]');
+      if (pathInp && nameInp) {
+        let auto = true;
+        nameInp.addEventListener("input", () => { auto = !nameInp.value.trim(); });
+        pathInp.addEventListener("input", () => {
+          if (auto) nameInp.value = basename(pathInp.value.trim());
+        });
+      }
+    };
+    typeSel.addEventListener("change", renderAttrs);
+    renderAttrs();
+    const kindSel = el("select", { name: "qf_time_kind" },
+      TIME_KINDS.map(([v, label]) => el("option", { value: v }, label)));
+    const body = el("div", { class: "form-grid qf-body", style: "display:none" },
+      field("What did you find?", textInput("qf_title",
+        "leave the section closed if the step found nothing"), true),
+      field("Type", typeSel),
+      field("Event time (UTC)", textInput("qf_time", "e.g. 2023-01-13 17:31")),
+      field("Time means", kindSel),
+      attrs,
+      field("Detail", el("textarea", { name: "qf_detail" }), true));
+    let open = false;
+    const toggle = el("button", { class: "btn small ghost", type: "button" },
+      "＋ It produced a finding…");
+    toggle.addEventListener("click", () => {
+      open = !open;
+      body.style.display = open ? "" : "none";
+      toggle.textContent = open ? "— No finding after all (log step only)"
+                                : "＋ It produced a finding…";
+      if (open) body.querySelector('[name="qf_title"]').focus();
+    });
+    return { el: el("div", { class: "field wide qf-wrap" }, toggle, body),
+             isOpen: () => open };
+  }
+  const quick = existing ? null : quickFindingSection();
+
   function sync() {
     const manual = method.value === "manual";
     commandField.style.display = manual ? "none" : "";
@@ -975,6 +1024,7 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
     outputField,
     exitField,
     shots ? field("Screenshot", shots.el, true) : null,
+    quick ? quick.el : null,
   ];
 
   const form = formCard({
@@ -1005,13 +1055,42 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
         await refreshInfo();
         await done(existing.id);
       } else {
+        const qfTitle = quick && quick.isOpen()
+          ? data.get("qf_title").trim() : "";
+        if (quick && quick.isOpen() && !qfTitle) {
+          throw new Error("give the finding a title — or close its section "
+            + "to log the step alone");
+        }
         payload.output = m === "command" ? (data.get("output") || "") : "";
         payload.parent_finding_id = parentFindingId
           ?? (template ? template.parent_finding_id : null) ?? null;
         const res = await api("/api/actions", { method: "POST", body: payload });
         if (shots) await uploadPending("action", res.id, shots);
+        let findingId = null;
+        if (qfTitle) {
+          // one save, two records: the finding hangs off the step just
+          // created, inheriting its evidence and the evidence's hosts
+          const attrs = {};
+          for (const [k, v] of data.entries()) {
+            if (k.startsWith("qfattr:") && v.trim() !== "") attrs[k.slice(7)] = v.trim();
+          }
+          const ev = state.info.evidence.find(
+            (x) => x.id === payload.evidence_id);
+          const fres = await api("/api/findings", { method: "POST", body: {
+            title: qfTitle,
+            ftype: data.get("qf_type"),
+            event_time: data.get("qf_time").trim(),
+            time_kind: data.get("qf_time_kind") || "",
+            detail: data.get("qf_detail").trim(),
+            attrs,
+            action_id: res.id,
+            evidence_id: payload.evidence_id,
+            host_ids: ((ev && ev.hosts) || []).map((h) => h.id),
+          }});
+          findingId = fres.id;
+        }
         await refreshInfo();
-        await done(res.id);
+        await done(res.id, findingId);
       }
     },
   });

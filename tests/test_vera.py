@@ -96,6 +96,163 @@ def test_manual_step(case):
         case.add_action(method="command")  # empty command
 
 
+def test_account_registry_auto_link(case):
+    a = case.add_action(command="EvtxECmd -f Security.evtx")
+    f1 = case.add_finding("svc-backup", ftype="account", action_id=a,
+                          attrs={"account_type": "Domain Admin",
+                                 "sid": "S-1-5-21-1"})
+    accts = case.accounts()
+    assert len(accts) == 1
+    acc = accts[0]
+    assert acc["name"] == "svc-backup" and acc["sid"] == "S-1-5-21-1"
+    assert acc["account_type"] == "Domain Admin"
+    assert acc["finding_count"] == 1
+    # lateral movement naming the same account (case-insensitive) reuses it
+    f2 = case.add_finding("WMI to DC", ftype="lateral", action_id=a,
+                          attrs={"source_host": "WS01", "dest_host": "DC01",
+                                 "account": "SVC-BACKUP"})
+    accts = case.accounts()
+    assert len(accts) == 1 and accts[0]["finding_count"] == 2
+    linked = {f["id"] for f in case.findings_for_account(accts[0]["id"])}
+    assert linked == {f1, f2}
+    assert case.counts()["accounts"] == 1
+    # editing the finding to another account re-derives the tie
+    case.update_finding(f2, attrs={"account": "jdoe-adm"})
+    by_name = {x["name"]: x["finding_count"] for x in case.accounts()}
+    assert by_name == {"jdoe-adm": 1, "svc-backup": 1}
+    # a non-account finding registers nothing
+    case.add_finding("random note", ftype="note", action_id=a)
+    assert len(case.accounts()) == 2
+
+
+def test_followups_on_regular_findings(case):
+    a = case.add_action(command="EvtxECmd -f Security.evtx")
+    f = case.add_finding("wacsvc explicit creds RD01 -> WKSTN01",
+                         ftype="lateral", action_id=a)
+    i1 = case.add_lead_item(f, "4624s on WKSTN01")
+    i2 = case.add_lead_item(f, "prefetch on WKSTN01")
+    # enrich carries the checklist on a NON-lead finding
+    fd = case.findings("lateral")[0]
+    assert fd["item_total"] == 2 and fd["item_resolved"] == 0
+    assert [it["label"] for it in fd["items"]] == \
+        ["4624s on WKSTN01", "prefetch on WKSTN01"]
+    # the case-wide queue shows open items with their owner
+    fus = case.followups()
+    assert [it["id"] for it in fus] == [i1, i2]
+    assert fus[0]["owner_ftype"] == "lateral"
+    assert fus[0]["owner_title"].startswith("wacsvc explicit creds")
+    # done items drop out of the queue but stay counted
+    case.update_lead_item(i1, status="triaged")
+    assert [it["id"] for it in case.followups()] == [i2]
+    fd = case.findings("lateral")[0]
+    assert fd["item_total"] == 2 and fd["item_resolved"] == 1
+    # lead items stay OUT of the follow-ups queue (they have their own views)
+    lead = case.add_finding("autoruns sweep", ftype="lead", action_id=a)
+    case.add_lead_item(lead, "stun.exe")
+    assert [it["id"] for it in case.followups()] == [i2]
+    # findings without items don't grow the keys
+    bare = case.add_finding("plain note", ftype="note", action_id=a)
+    fd = next(x for x in case.findings("note") if x["id"] == bare)
+    assert "item_total" not in fd
+
+
+def test_cli_followup(cli_case, capsys):
+    assert main(["run", "EvtxECmd -f Security.evtx"]) == 0
+    assert main(["finding", "explicit creds to WKSTN01", "-t", "lateral"]) == 0
+    assert main(["followup", "add", "F1", "4624s on WKSTN01",
+                 "prefetch on WKSTN01", "amcache on WKSTN01"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("added to F1") == 3
+    assert main(["followup"]) == 0
+    out = capsys.readouterr().out
+    assert "4624s on WKSTN01" in out and "amcache on WKSTN01" in out
+    assert main(["followup", "done", "1"]) == 0
+    capsys.readouterr()
+    assert main(["followup", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "4624s" not in out and "prefetch" in out
+
+
+def test_finding_account_picker(case):
+    a = case.add_action(command="x")
+    jdoe = case.add_account("jdoe")
+    svc = case.add_account("svc-backup")
+    # explicit association works on ANY finding type
+    f = case.add_finding("mimikatz on WS01", ftype="malware", action_id=a,
+                         account_ids=[jdoe, svc])
+    fd = case.findings("malware")[0]
+    assert {x["id"] for x in fd["accounts"]} == {jdoe, svc}
+    # content-only edits leave explicit picks alone
+    case.update_finding(f, title="mimikatz dropped on WS01")
+    fd = case.findings("malware")[0]
+    assert {x["id"] for x in fd["accounts"]} == {jdoe, svc}
+    # replacing links never drops the account the finding itself names
+    f2 = case.add_finding("svc-backup", ftype="account", action_id=a)
+    case.set_finding_accounts(f2, [jdoe])
+    fd2 = case.findings("account")[0]
+    assert {x["name"] for x in fd2["accounts"]} == {"jdoe", "svc-backup"}
+    # resolve_accounts: ids or names, auto-create only when asked
+    assert case.resolve_accounts(["jdoe", str(svc)]) == [jdoe, svc]
+    with pytest.raises(CaseError):
+        case.resolve_accounts(["ghost"])
+    new_id = case.resolve_accounts(["ghost"], create=True)[0]
+    assert any(x["id"] == new_id for x in case.accounts())
+
+
+def test_account_update_and_soft_delete(case):
+    aid = case.add_account("jdoe", sid="S-1", account_type="User")
+    # merge on name collision fills blanks, never overwrites
+    same = case.add_account("JDOE", account_type="Admin", notes="from triage")
+    assert same == aid
+    acc = case.accounts()[0]
+    assert acc["account_type"] == "User" and acc["notes"] == "from triage"
+    case.update_account(aid, status="compromised")
+    assert case.accounts()[0]["status"] == "compromised"
+    with pytest.raises(CaseError):
+        case.update_account(aid, status="bogus")
+    case.soft_delete_account(aid)
+    assert case.accounts() == []
+
+
+def test_account_registry_migration_backfill(tmp_path):
+    p = str(tmp_path / "old.vera")
+    c = Case(p, create=True)
+    c.set_meta(name="m")
+    a = c.add_action(command="x")
+    c.add_finding("svc-backup", ftype="account", action_id=a,
+                  attrs={"sid": "S-1"})
+    c.add_finding("psexec to FS01", ftype="lateral", action_id=a,
+                  attrs={"account": "svc-backup"})
+    # rewind to v15: drop the registry, relabel the schema
+    with c.conn:
+        c.conn.execute("DROP TABLE finding_accounts")
+        c.conn.execute("DROP TABLE accounts")
+        c.conn.execute(
+            "UPDATE case_meta SET value = '15' WHERE key = 'schema_version'")
+    c.close()
+    with Case(p) as c2:  # migration backfills from the existing findings
+        accts = c2.accounts()
+        assert [x["name"] for x in accts] == ["svc-backup"]
+        assert accts[0]["sid"] == "S-1"
+        assert accts[0]["finding_count"] == 2
+
+
+def test_tool_suggestions(case):
+    # a fresh case still offers the curated defaults, no dupes
+    sug = case.tool_suggestions()
+    assert sug and sug[0] == types.DEFAULT_TOOLS[0]
+    assert len(sug) == len({s.lower() for s in sug})
+
+    # tools the case actually uses lead, most-recent-first, ahead of defaults
+    case.add_action(method="manual", tool="Bespoke Parser", procedure="x")
+    case.add_action(command="vol.py -f mem.raw windows.pstree")
+    case.add_collection("triage", tool="KAPE Batch")
+    sug = case.tool_suggestions()
+    assert sug[:3] == ["vol.py", "Bespoke Parser", "KAPE Batch"]
+    assert "Bespoke Parser" in sug and "Registry Explorer" in sug
+    assert len(sug) == len({s.lower() for s in sug})
+
+
 def test_attachment_roundtrip_and_graph(case):
     a = case.add_action("vol.py pslist", host="WS01")
     f = case.add_finding("evil dll", ftype="malware", action_id=a)
@@ -662,6 +819,40 @@ def test_cli_flow(cli_case, capsys):
     assert "confirmed" in capsys.readouterr().out
 
 
+def test_cli_account(cli_case, capsys, tmp_path):
+    listing = tmp_path / "suspects.txt"
+    listing.write_text("svc-backup\njdoe-adm\n")
+    assert main(["account", "add", "--from", str(listing),
+                 "--status", "suspicious"]) == 0
+    assert "2 account(s) registered" in capsys.readouterr().out
+
+    # a finding naming a registered account links to it (and fills blanks)
+    assert main(["run", "EvtxECmd -f Security.evtx", "--host", "WS01"]) == 0
+    assert main(["finding", "svc-backup", "-t", "account",
+                 "--sid", "S-1-5-21-7", "--account-type", "Domain Admin"]) == 0
+    capsys.readouterr()
+    assert main(["account", "show", "svc-backup"]) == 0
+    out = capsys.readouterr().out
+    assert "S-1-5-21-7" in out and "Domain Admin" in out
+    assert "findings naming this account: 1" in out
+
+    assert main(["account", "edit", "jdoe-adm", "--status", "compromised",
+                 "--domain", "CORP"]) == 0
+    capsys.readouterr()
+    assert main(["account", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "svc-backup" in out and "COMPROMISED" in out
+
+    # associate accounts with any finding: at creation and via edit
+    assert main(["finding", "mimikatz dropped", "-t", "malware",
+                 "--accounts", "svc-backup, operator2"]) == 0
+    assert main(["edit", "F2", "--accounts", "jdoe-adm"]) == 0
+    capsys.readouterr()
+    assert main(["account", "show", "jdoe-adm"]) == 0
+    out = capsys.readouterr().out
+    assert "findings naming this account: 1" in out and "mimikatz" in out
+
+
 def test_cli_errors(cli_case, capsys):
     assert main(["show", "A99"]) == 1
     assert "A99 does not exist" in capsys.readouterr().err
@@ -756,6 +947,67 @@ def test_create_and_open_case_via_api(blank_server):
 
     status, raw = _req(port, "POST", "/api/cases", {"name": ""})
     assert status == 400
+
+
+def test_accounts_api(running_server):
+    port = running_server
+    # the sample case's account finding is already auto-registered
+    info = json.loads(_req(port, "GET", "/api/case")[1])
+    by_name = {a["name"]: a for a in info["accounts"]}
+    assert by_name["svc-backup"]["sid"] == "S-1-5-21-1-2-3-1105"
+    assert by_name["svc-backup"]["finding_count"] == 1
+
+    # batch add via the API (e.g. a pasted list of suspect accounts) — the
+    # existing svc-backup row is merged (blanks filled, nothing overwritten)
+    status, raw = _req(port, "POST", "/api/accounts",
+                       {"names": ["svc-backup", "jdoe-adm"],
+                        "status": "suspicious"})
+    assert status == 201 and json.loads(raw)["count"] == 2
+
+    # a new account finding links to the merged registry row
+    status, raw = _req(port, "POST", "/api/findings",
+                       {"title": "svc-backup", "ftype": "account",
+                        "attrs": {"sid": "S-1-5-21-9", "account_type": "Admin"}})
+    assert status == 201
+    info = json.loads(_req(port, "GET", "/api/case")[1])
+    by_name = {a["name"]: a for a in info["accounts"]}
+    assert set(by_name) == {"svc-backup", "jdoe-adm"}
+    assert by_name["svc-backup"]["sid"] == "S-1-5-21-1-2-3-1105"  # not clobbered
+    assert by_name["svc-backup"]["status"] == "suspicious"        # blank filled
+    assert by_name["svc-backup"]["finding_count"] == 2
+
+    aid = by_name["jdoe-adm"]["id"]
+    status, _ = _req(port, "PATCH", f"/api/accounts/{aid}",
+                     {"status": "compromised", "sid": "S-1-5-21-10"})
+    assert status == 200
+    accts = json.loads(_req(port, "GET", "/api/accounts")[1])
+    jd = next(a for a in accts if a["name"] == "jdoe-adm")
+    assert jd["status"] == "compromised" and jd["sid"] == "S-1-5-21-10"
+
+    status, _ = _req(port, "DELETE", f"/api/accounts/{aid}")
+    assert status == 200
+    accts = json.loads(_req(port, "GET", "/api/accounts")[1])
+    assert all(a["name"] != "jdoe-adm" for a in accts)
+
+    # associate accounts with a non-account finding via names (auto-created)
+    status, raw = _req(port, "POST", "/api/findings",
+                       {"title": "mimikatz.exe dropped", "ftype": "malware",
+                        "account_names": ["svc-backup", "operator2"]})
+    assert status == 201
+    fid = json.loads(raw)["id"]
+    tree = json.loads(_req(port, "GET", "/api/tree")[1])
+    # the new finding is unattached (no action) — find it there
+    f = next(x for x in tree["unattached"] if x["id"] == fid)
+    assert {a["name"] for a in f["accounts"]} == {"svc-backup", "operator2"}
+    # PATCH with account_ids replaces the set
+    accts = json.loads(_req(port, "GET", "/api/accounts")[1])
+    op2 = next(a["id"] for a in accts if a["name"] == "operator2")
+    status, _ = _req(port, "PATCH", f"/api/findings/{fid}",
+                     {"account_ids": [op2]})
+    assert status == 200
+    tree = json.loads(_req(port, "GET", "/api/tree")[1])
+    f = next(x for x in tree["unattached"] if x["id"] == fid)
+    assert {a["name"] for a in f["accounts"]} == {"operator2"}
 
 
 def test_api_write(running_server):

@@ -296,6 +296,62 @@ def cmd_host(args) -> int:
     return 0
 
 
+def cmd_account(args) -> int:
+    with open_case(args) as case:
+        if args.account_cmd == "add":
+            names = list(args.names)
+            if args.from_file:
+                names += _read_host_file(args.from_file)
+            if not names:
+                raise CaseError("give at least one account name (or --from FILE)")
+            for name in names:
+                acct_id = case.add_account(
+                    name, domain=args.domain or "", sid=args.sid or "",
+                    account_type=args.type or "", status=args.status or "",
+                    notes=args.note or "")
+                print(f"account {acct_id}  {name}")
+            print(f"{len(names)} account(s) registered")
+        elif args.account_cmd == "edit":
+            acct_id = case.resolve_account(args.ref)
+            fields = {k: v for k, v in (
+                ("name", args.name), ("domain", args.domain), ("sid", args.sid),
+                ("account_type", args.type), ("status", args.status),
+                ("notes", args.note)) if v is not None}
+            if not fields:
+                raise CaseError("nothing to change — pass --name/--sid/--type/…")
+            case.update_account(acct_id, **fields)
+            print(f"account {acct_id} updated")
+        elif args.account_cmd == "show":
+            acct_id = case.resolve_account(args.ref)
+            a = next(x for x in case.accounts() if x["id"] == acct_id)
+            print(f"account {a['id']}  {a['name']}")
+            for key, label in (("domain", "domain"), ("sid", "sid"),
+                               ("account_type", "type"), ("status", "status"),
+                               ("notes", "notes")):
+                if a[key]:
+                    print(f"  {label}: {a[key]}")
+            findings = case.findings_for_account(acct_id)
+            print(f"  findings naming this account: {len(findings)}")
+            for f in findings:
+                print(f"    F{f['id']} [{f['ftype']}] {f['title']}")
+        else:
+            accounts = case.accounts()
+            if not accounts:
+                print("no accounts registered — they auto-register from "
+                      "account/lateral findings, or 'vera account add jdoe …'")
+            for a in accounts:
+                extra = f"  {a['domain']}\\" if a["domain"] else "  "
+                extra = f"{extra}{a['sid']}" if a["sid"] else extra.rstrip("\\ ")
+                if a["account_type"]:
+                    extra += f"  [{a['account_type']}]"
+                if a["status"]:
+                    extra += "  " + c(_STATUS_COLOR.get(a["status"], "0"),
+                                      a["status"].upper())
+                print(f"{a['id']:>3}  {a['name']:<20}{extra}  "
+                      f"({a['finding_count']} findings)")
+    return 0
+
+
 def cmd_collection(args) -> int:
     with open_case(args) as case:
         if args.collection_cmd == "add":
@@ -597,12 +653,16 @@ def cmd_finding(args) -> int:
                 except CaseError:
                     pass  # endpoint outside the registry (e.g. external box)
             host_ids = sorted(linked)
+        account_refs = _parse_host_list(args.accounts)
+        account_ids = (case.resolve_accounts(account_refs, create=True)
+                       if account_refs else None)
         f = case.add_finding(args.title, ftype=args.type, action_id=action_id,
                              host=args.host or "", detail=args.detail or "",
                              event_time=args.time or "",
                              time_kind=args.time_kind or "",
                              attrs=attrs, starred=args.star,
-                             host_ids=host_ids or None, hashes=hashes)
+                             host_ids=host_ids or None, hashes=hashes,
+                             account_ids=account_ids)
         label = types.FINDING_TYPES[args.type].label
         under = f" under {aid(action_id)}" if action_id else " (unattached)"
         stack = f" — affects {len(host_ids)} host(s)" if host_ids else ""
@@ -734,6 +794,34 @@ def cmd_lead(args) -> int:
                     link = f"  → F{it['finding']['id']}" if it["finding"] else ""
                     print(f"    [{it['id']}] {mark} {it['label']}"
                           f"{c('2', f' {it['status']}')}{c('2', link)}")
+    return 0
+
+
+def cmd_followup(args) -> int:
+    with open_case(args) as case:
+        op = getattr(args, "fu_cmd", None)
+        if op == "add":
+            finding_id = _resolve_finding_ref(args.ref)
+            for label in args.labels:
+                item_id = case.add_lead_item(finding_id, label)
+                print(f"item {item_id} added to F{finding_id}: {label}")
+        elif op == "done":
+            case.update_lead_item(args.item, status="triaged")
+            print(f"item {args.item} done")
+        elif op == "open":
+            case.update_lead_item(args.item, status="open")
+            print(f"item {args.item} reopened")
+        elif op == "rm":
+            case.soft_delete_lead_item(args.item)
+            print(f"item {args.item} removed")
+        else:
+            fus = case.followups()
+            if not fus:
+                print("✓ no open follow-ups")
+                return 0
+            for it in fus:
+                print(f"[{it['id']}] F{it['lead_id']} ({it['owner_ftype']}) "
+                      f"{it['owner_title']}  —  {it['label']}")
     return 0
 
 
@@ -957,9 +1045,14 @@ def cmd_edit(args) -> int:
             new_attrs = _collect_attrs(args)
             if new_attrs:
                 fields["attrs"] = {**f["attrs"], **new_attrs}
-            if not fields:
+            account_refs = _parse_host_list(args.accounts)
+            if not fields and not account_refs:
                 raise CaseError("nothing to change")
-            case.update_finding(ref_id, **fields)
+            if fields:
+                case.update_finding(ref_id, **fields)
+            if account_refs:
+                case.set_finding_accounts(
+                    ref_id, case.resolve_accounts(account_refs, create=True))
         else:
             raise CaseError("edit expects A<n> or F<n>")
         print(f"{args.ref.upper()} updated")
@@ -1097,6 +1190,36 @@ def build_parser() -> argparse.ArgumentParser:
     hsub.add_parser("list", help="list registered hosts")
     p.set_defaults(func=cmd_host)
 
+    p = sub.add_parser("account",
+                       help="manage the account registry (auto-fed by "
+                            "account/lateral findings)")
+    asub = p.add_subparsers(dest="account_cmd", required=True)
+    aa = asub.add_parser("add", help="register one or more accounts")
+    aa.add_argument("names", nargs="*", help="account name(s), e.g. jdoe svc-backup")
+    aa.add_argument("--from", dest="from_file", metavar="FILE",
+                    help="read account names, one per line, from a file")
+    aa.add_argument("--domain")
+    aa.add_argument("--sid")
+    aa.add_argument("--type", help="Admin / Domain Admin / User / service …")
+    aa.add_argument("--status", choices=("unknown", "clean", "suspicious",
+                                         "compromised"),
+                    help="disposition (default: unknown)")
+    aa.add_argument("--note")
+    ae = asub.add_parser("edit", help="edit an account after adding it")
+    ae.add_argument("ref", help="account id or name")
+    ae.add_argument("--name", help="rename the account")
+    ae.add_argument("--domain")
+    ae.add_argument("--sid")
+    ae.add_argument("--type", help="Admin / Domain Admin / User / service …")
+    ae.add_argument("--status", choices=("unknown", "clean", "suspicious",
+                                         "compromised"))
+    ae.add_argument("--note")
+    ash = asub.add_parser("show",
+                          help="show an account and the findings naming it")
+    ash.add_argument("ref", help="account id or name")
+    asub.add_parser("list", help="list registered accounts")
+    p.set_defaults(func=cmd_account)
+
     p = sub.add_parser("collection", help="manage collections/batches (a sweep)")
     csub = p.add_subparsers(dest="collection_cmd", required=True)
     ca = csub.add_parser("add", help="register a collection/batch")
@@ -1158,6 +1281,23 @@ def build_parser() -> argparse.ArgumentParser:
     lr.add_argument("item", type=int, help="the item id")
     lsub.add_parser("list", help="list leads and their items")
     p.set_defaults(func=cmd_lead)
+
+    p = sub.add_parser("followup",
+                       help="follow-up checklist on a finding (bare "
+                            "'vera followup' lists everything still open)")
+    fsub = p.add_subparsers(dest="fu_cmd", required=False)
+    fa = fsub.add_parser("add", help="add checklist item(s) to a finding")
+    fa.add_argument("ref", help="the finding to follow up on, e.g. F70")
+    fa.add_argument("labels", nargs="+",
+                    help="one or more items, e.g. \"4624s on WKSTN01\"")
+    fd = fsub.add_parser("done", help="mark an item done (triaged)")
+    fd.add_argument("item", type=int, help="the item id")
+    fo = fsub.add_parser("open", help="reopen an item")
+    fo.add_argument("item", type=int, help="the item id")
+    fr = fsub.add_parser("rm", help="remove an item (soft-delete)")
+    fr.add_argument("item", type=int, help="the item id")
+    fsub.add_parser("list", help="list open follow-ups across all findings")
+    p.set_defaults(func=cmd_followup)
 
     p = sub.add_parser("coverage", help="per-host analysis rollup — spot hosts "
                                         "nobody has examined yet")
@@ -1241,6 +1381,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="affected host(s) — registry refs (RD03 / H3), comma/"
                             "space list, must already exist. Omit to inherit the "
                             "action's host(s). 2+ stacks the finding across hosts.")
+        p.add_argument("--accounts", action="append", metavar="LIST",
+                       help="associated account(s) — names or ids, comma/space "
+                            "list; unknown names are registered automatically")
         p.add_argument("--time", help="when it happened in the incident "
                                       "(drives the timeline; UTC)")
         p.add_argument("--time-kind", dest="time_kind",
@@ -1291,6 +1434,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--on", metavar="A#", help=argparse.SUPPRESS)
     p.add_argument("--star", action="store_true")
     p.add_argument("--unstar", action="store_true")
+    p.add_argument("--accounts", action="append", metavar="LIST",
+                   help="replace a finding's associated account(s) — names or "
+                        "ids, comma/space list; unknown names are registered")
     _add_attr_flags(p)
     p.set_defaults(func=cmd_edit)
 

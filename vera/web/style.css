@@ -73,6 +73,11 @@ nav {
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   overflow-x: auto;
+  /* pinned right under the (sticky) header; --header-h is kept in sync by JS
+     so a wrapping case title can't leave a gap */
+  position: sticky;
+  top: var(--header-h, 48px);
+  z-index: 9;
 }
 nav button {
   border: none;
@@ -168,12 +173,49 @@ label.field input, label.field select, label.field textarea {
   padding: 7px 9px;
   font: inherit;
   font-size: 14px;
+  line-height: 1.4;      /* pin content height so <input> and <select> match */
+  height: 36px;          /* identical control height across input + select */
   color: var(--ink);
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 7px;
 }
-label.field textarea { font-family: var(--mono); font-size: 13px; min-height: 64px; }
+label.field textarea {
+  font-family: var(--mono); font-size: 13px; min-height: 64px; height: auto;
+}
+
+/* custom tool autocomplete (replaces the unstylable native <datalist>) */
+.combo { position: relative; }
+.combo-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;               /* same width as the input */
+  z-index: 60;
+  margin: 3px 0 0;
+  padding: 3px;
+  max-height: 220px;      /* locked height, scroll past it */
+  overflow-y: auto;
+  list-style: none;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+}
+.combo-list[hidden] { display: none; }
+.combo-list li {
+  padding: 6px 8px;
+  border-radius: 5px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.combo-list li.active { background: var(--accent); color: var(--accent-ink); }
+.combo-list li:hover { background: var(--code-bg); }
+.combo-list li.active:hover { background: var(--accent); }
 label.field input:focus, label.field select:focus, label.field textarea:focus {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
@@ -222,6 +264,21 @@ label.field input:focus, label.field select:focus, label.field textarea:focus {
 }
 .collapse-toggle:hover { color: var(--accent); }
 .node-action.collapsed, .node-finding.collapsed { padding-top: 8px; padding-bottom: 8px; }
+/* finding headlines shown inside a collapsed action */
+.collapsed-findings { margin: 4px 0 2px 22px; }
+.collapsed-finding {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 4px; border-radius: 5px;
+  font-size: 12px; cursor: pointer;
+}
+.collapsed-finding:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.collapsed-finding .ref { font-size: 11px; padding: 0 5px; flex: none; }
+.collapsed-finding .tag { flex: none; }
+.collapsed-finding .star-mark { color: var(--star); flex: none; }
+.collapsed-finding-title {
+  font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.collapsed-finding.more { color: var(--muted); font-weight: 600; }
 .collapsed-preview {
   font-family: var(--mono); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; max-width: 48ch;

@@ -7,6 +7,7 @@ const state = {
   jumpTo: null,     // node id to scroll to after switching to investigation
   notice: null,     // one-shot message shown on the next render
   collapsed: new Set(),  // action ids collapsed in the investigation view
+  collapsedInit: false,  // tree starts fully collapsed once per case open
 };
 
 // host disposition — '' means not yet triaged
@@ -62,6 +63,7 @@ function basename(p) {
 
 async function boot() {
   state.info = await api("/api/case");
+  state.collapsedInit = false;  // a (re)opened case starts collapsed again
   const exportLink = document.getElementById("export-md");
   if (!state.info.active) {
     if (exportLink) exportLink.style.display = "none";
@@ -151,6 +153,7 @@ function tabList() {
     { id: "stack", label: "Stack" },
     { id: "coverage", label: "Coverage" },
     { id: "hosts", label: "Hosts" },
+    { id: "accounts", label: "Accounts" },
     { id: "evidence", label: "Evidence" },
   ];
 }
@@ -204,8 +207,18 @@ function spreadsheetDropdown(sheets) {
   return wrap;
 }
 
+// the tabs stick right below the header — keep the offset in sync with the
+// header's real height (the case title can wrap on narrow windows)
+function syncHeaderHeight() {
+  const h = document.querySelector("header");
+  if (h) document.documentElement.style.setProperty(
+    "--header-h", h.offsetHeight + "px");
+}
+window.addEventListener("resize", syncHeaderHeight);
+
 function buildTabs() {
   const nav = document.getElementById("tabs");
+  syncHeaderHeight();
   nav.replaceChildren();
   for (const tab of tabList()) {
     nav.append(el("button", {
@@ -222,6 +235,7 @@ function updateCounts() {
   const bits = [`${c.actions} actions`, `${c.findings} findings`,
     `${c.evidence} evidence`];
   if (c.hosts) bits.push(`${c.hosts} hosts`);
+  if (c.accounts) bits.push(`${c.accounts} accounts`);
   document.getElementById("case-counts").textContent = bits.join(" · ");
 }
 
@@ -240,6 +254,7 @@ async function render() {
     else if (state.tab === "stack") await renderStack(view);
     else if (state.tab === "artifacts") await renderArtifacts(view);
     else if (state.tab === "hosts") await renderHosts(view);
+    else if (state.tab === "accounts") await renderAccounts(view);
     else if (state.tab === "coverage") await renderCoverage(view);
     else if (state.tab === "evidence") await renderEvidence(view);
     else if (state.tab.startsWith("type:")) {
@@ -265,12 +280,26 @@ async function reload(jumpTo = null) {
 // run `fn` (a re-render), then nudge the scroll so `anchorId` stays put in the
 // viewport — used for in-place edits/toggles so the page doesn't jump to the top
 async function keepInView(anchorId, fn) {
+  // re-rendering swaps in a short "loading…" view, so the browser clamps the
+  // scroll to the top mid-render — always restore, never rely on it surviving
   const before = document.getElementById(anchorId);
   const top = before ? before.getBoundingClientRect().top : null;
+  const scrollY = window.scrollY;
   await fn();
-  if (top !== null) {
-    const after = document.getElementById(anchorId);
-    if (after) window.scrollBy(0, after.getBoundingClientRect().top - top);
+  const after = document.getElementById(anchorId);
+  if (after && top !== null) {
+    // anchor existed before: put it back at the same viewport position
+    window.scrollBy(0, after.getBoundingClientRect().top - top);
+  } else if (after) {
+    // anchor is NEW (e.g. a finding revealed by expanding its step): restore
+    // the old scroll, then make sure the anchor is actually visible
+    window.scrollTo(0, scrollY);
+    const r = after.getBoundingClientRect();
+    if (r.top < 0 || r.bottom > window.innerHeight) {
+      after.scrollIntoView({ block: "center" });
+    }
+  } else {
+    window.scrollTo(0, scrollY);
   }
 }
 
@@ -296,6 +325,79 @@ function divField(labelText, node, wide = false) {
 
 function textInput(name, placeholder = "", value = "") {
   return el("input", { name, placeholder, value, autocomplete: "off" });
+}
+
+// A text input with a custom autocomplete dropdown: past + default values
+// filter as you type, but any new value can still be typed freely. Replaces the
+// native <datalist>, which browsers render as an OS-level popup that can't be
+// sized, positioned, or width-matched (it drifts and can run full-screen). The
+// dropdown here is absolutely positioned inside `.combo` so it stays directly
+// under the input, matches its width, and is height-capped with scroll.
+// Returns the wrapper; FormData still finds the named input inside it.
+function comboInput(name, options, placeholder = "", value = "") {
+  options = (options || []).filter(Boolean);
+  const input = el("input", {
+    name, placeholder, value, autocomplete: "off",
+    role: "combobox", "aria-autocomplete": "list", "aria-expanded": "false" });
+  const list = el("ul", { class: "combo-list", hidden: "" });
+  const wrap = el("div", { class: "combo" }, input, list);
+  let active = -1;  // highlighted row among those currently shown
+
+  const rows = () => [...list.children];
+  function close() {
+    list.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+    active = -1;
+  }
+  function setActive(i) {
+    const items = rows();
+    if (!items.length) return;
+    active = (i + items.length) % items.length;
+    items.forEach((li, n) => li.classList.toggle("active", n === active));
+    items[active].scrollIntoView({ block: "nearest" });
+  }
+  function choose(val) {
+    input.value = val;
+    close();
+    input.focus();
+    // picking from the list counts as a change (prefill/auto-link listeners);
+    // typed-then-blurred values fire the native change event on their own
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  function render() {
+    const q = input.value.trim().toLowerCase();
+    const matches = options
+      .filter((o) => !q || o.toLowerCase().includes(q))
+      .slice(0, 50);
+    list.replaceChildren(...matches.map((o) => {
+      const li = el("li", {}, o);
+      // mousedown (not click) so selection fires before the input's blur, and
+      // preventDefault keeps focus on the input
+      li.addEventListener("mousedown", (e) => { e.preventDefault(); choose(o); });
+      return li;
+    }));
+    active = -1;
+    if (!matches.length) { close(); return; }
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+  }
+
+  input.addEventListener("focus", render);
+  input.addEventListener("input", render);
+  input.addEventListener("keydown", (e) => {
+    if (list.hidden) {
+      if (e.key === "ArrowDown") render();
+      return;
+    }
+    if (e.key === "ArrowDown") { e.preventDefault(); setActive(active + 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActive(active - 1); }
+    else if (e.key === "Enter" && active >= 0) {
+      e.preventDefault();
+      choose(rows()[active].textContent);
+    } else if (e.key === "Escape") { e.stopPropagation(); close(); }
+  });
+  input.addEventListener("blur", () => setTimeout(close, 0));
+  return wrap;
 }
 
 function formCard({ fields, submitLabel, onsubmit, oncancel }) {
@@ -421,10 +523,19 @@ function shotStager(role, label) {
   zone.addEventListener("drop", (e) => {
     e.preventDefault(); zone.classList.remove("drag"); add(e.dataTransfer.files);
   });
-  zone.addEventListener("paste", (e) => {
+  // Capture image pastes anywhere in the enclosing modal, not just when the
+  // dropzone itself is focused. openFormModal() focuses the first text field on
+  // open, so in the combined Step/Finding modal a plain Ctrl+V would otherwise
+  // land in that field and never reach the zone. Text pastes (no image on the
+  // clipboard) fall through untouched, so command/path fields still paste
+  // normally. Scoped to this stager's own modal so stacked modals don't
+  // cross-fire; the listener dies with the modal node when it's removed.
+  const onPaste = (e) => {
     const imgs = imagesFromClipboard(e);
     if (imgs.length) { e.preventDefault(); add(imgs); }
-  });
+  };
+  setTimeout(() =>
+    (zone.closest(".modal") || zone).addEventListener("paste", onPaste), 0);
   return { el: el("div", {}, zone, strip), items, role };
 }
 
@@ -692,6 +803,137 @@ function hostPicker(initial, opts = {}) {
   };
 }
 
+/* Associated-accounts picker — same pattern (and CSS) as the host picker:
+   chips + a collapsed editor with search, checklist and an inline "+ new
+   account" form. Selection is from the account registry; new names can be
+   registered inline so the registry stays authoritative. */
+function accountPicker(initial, opts = {}) {
+  const { label = "", hint = "" } = typeof opts === "string" ? { hint: opts } : opts;
+  const chosen = new Map();  // id -> account object (from state.info.accounts)
+  const byId = new Map((state.info.accounts || []).map((a) => [a.id, a]));
+  for (const a of (initial || [])) chosen.set(a.id, byId.get(a.id) || a);
+
+  const chips = el("div", { class: "host-chips" });
+  const count = el("span", { class: "stack-count" });
+  const search = el("input", { class: "host-search",
+    placeholder: "search by name, SID, domain or type…", autocomplete: "off" });
+  const list = el("div", { class: "host-checklist" });
+
+  const allAccounts = () => state.info.accounts || [];
+  function filtered() {
+    const q = search.value.trim().toLowerCase();
+    if (!q) return allAccounts();
+    return allAccounts().filter((a) =>
+      (a.name + " " + (a.domain || "") + " " + (a.sid || "") + " "
+        + (a.account_type || "") + " " + (a.notes || ""))
+        .toLowerCase().includes(q));
+  }
+
+  function refresh() { refreshChips(); renderList(); syncEditBtn(); }
+
+  function refreshChips() {
+    chips.replaceChildren(...[...chosen.values()].map((a) =>
+      el("span", { class: "host-chip" }, `👤 ${a.name}`,
+        el("button", { type: "button", class: "chip-x", title: "remove",
+          onclick: () => { chosen.delete(a.id); refresh(); } }, "×"))));
+    count.textContent = chosen.size
+      ? `👤 ${chosen.size} account${chosen.size > 1 ? "s" : ""}` : "";
+  }
+
+  function renderList() {
+    const rows = filtered();
+    const q = search.value.trim().toLowerCase();
+    list.replaceChildren(...rows.map((a) => {
+      const on = chosen.has(a.id);
+      const row = el("label", { class: "host-opt" + (on ? " on" : "") },
+        el("input", { type: "checkbox", ...(on ? { checked: "" } : {}) }),
+        el("span", { class: "host-opt-name" }, a.name),
+        el("span", { class: "host-opt-ip mono" }, a.sid || ""),
+        el("span", { class: "host-opt-role" },
+          [a.account_type, a.status].filter(Boolean).join(" · ")));
+      row.querySelector("input").addEventListener("change", (e) => {
+        if (e.target.checked) chosen.set(a.id, a); else chosen.delete(a.id);
+        refreshChips();
+        row.classList.toggle("on", e.target.checked);
+      });
+      return row;
+    }));
+    if (!rows.length) {
+      list.append(el("div", { class: "hint", style: "padding:8px" },
+        q ? "no match — " : "no accounts registered — ",
+        el("a", { href: "#", class: "ref-link", onclick: (ev) => {
+          ev.preventDefault(); addForm.style.display = "block";
+          nameI.value = q;
+          nameI.focus();
+        } }, "add an account")));
+    }
+  }
+  search.addEventListener("input", renderList);
+
+  const nameI = el("input", { placeholder: "new account name (e.g. svc-backup)" });
+  const typeI = el("input", { placeholder: "type (optional)" });
+  const addErr = el("span", { class: "form-error" });
+  const addForm = el("div", { class: "host-add", style: "display:none" },
+    nameI, typeI,
+    el("button", { type: "button", class: "btn small primary", onclick: async () => {
+      const name = nameI.value.trim();
+      if (!name) { addErr.textContent = "name required"; return; }
+      addErr.textContent = "";
+      try {
+        const res = await api("/api/accounts", { method: "POST", body: {
+          name, account_type: typeI.value.trim() } });
+        const id = (res.ids || [])[0];
+        await refreshInfo();
+        const full = (state.info.accounts || []).find((a) => a.id === id);
+        if (full) chosen.set(id, full);
+        nameI.value = typeI.value = "";
+        addForm.style.display = "none";
+        refresh();
+      } catch (e) { addErr.textContent = String(e.message || e); }
+    } }, "Add"),
+    el("button", { type: "button", class: "btn small",
+      onclick: () => { addForm.style.display = "none"; } }, "Cancel"),
+    addErr);
+  const addToggle = el("button", { type: "button", class: "btn small ghost",
+    onclick: () => {
+      addForm.style.display = addForm.style.display === "none" ? "block" : "none";
+      if (addForm.style.display === "block") nameI.focus();
+    } }, "+ new account");
+
+  const editor = el("div", { class: "host-editor", style: "display:none" },
+    hint ? el("div", { class: "hint host-editor-hint" }, hint) : null,
+    el("div", { class: "host-picker-controls" }, search, addToggle),
+    addForm, list);
+  const editBtn = el("button", { type: "button", class: "btn small ghost host-edit-toggle" });
+  const syncEditBtn = () => {
+    const open = editor.style.display !== "none";
+    editBtn.textContent = open ? "Done — hide picker ▴"
+      : (chosen.size ? "Edit accounts ▾" : "Choose accounts ▾");
+  };
+  editBtn.addEventListener("click", () => {
+    editor.style.display = editor.style.display === "none" ? "" : "none";
+    syncEditBtn();
+    if (editor.style.display !== "none") setTimeout(() => search.focus(), 0);
+  });
+
+  const wrap = el("div", { class: "host-picker compact" },
+    el("div", { class: "host-head" },
+      label ? el("span", { class: "host-head-label" }, label + ":") : null,
+      chips, count),
+    editBtn,
+    editor);
+  refresh();
+  syncEditBtn();
+  return {
+    el: wrap,
+    ids: () => [...chosen.keys()],
+    addAccounts: (as) => {
+      for (const a of (as || [])) chosen.set(a.id, byId.get(a.id) || a);
+      refresh();
+    },
+  };
+}
+
 /* one-line "N host(s): a, b, c +4 more" summary for read-only host notes */
 // a labelled free-text block so notes/detail read as a field, consistent
 // across action, finding and lead cards
@@ -723,6 +965,21 @@ function hostsInline(hosts, max = 3) {
     onclick: (ev) => { ev.stopPropagation(); state.tab = "hosts"; render(); } }, text);
 }
 
+// Registry-account chip on finding cards (mirrors hostsInline): the linked
+// account names, full list on hover; click → Accounts tab.
+function accountsInline(accounts, max = 2) {
+  const list = accounts || [];
+  if (!list.length) return null;
+  const names = list.map((a) => a.name);
+  const shown = names.slice(0, max).join(", ");
+  const extra = names.length - max;
+  const text = extra > 0 ? `👤 ${shown} +${extra} more` : `👤 ${shown}`;
+  return el("span", { class: "hosts-inline",
+    title: `${names.length} account${names.length > 1 ? "s" : ""}: ${names.join(", ")}`,
+    onclick: (ev) => { ev.stopPropagation(); state.tab = "accounts"; render(); } },
+    text);
+}
+
 // Clickable star used on every finding/lead card — toggles the "key finding"
 // flag inline (the one place that also works from the forms via a checkbox).
 function starToggle(f) {
@@ -735,6 +992,54 @@ function starToggle(f) {
       await reloadKeepingInView(`node-F${f.id}`);
     },
   }, f.starred ? "★" : "☆");
+}
+
+/* ---------- attr inputs backed by the registries ---------- */
+
+const accountNames = () => (state.info.accounts || []).map((a) => a.name);
+const hostNameList = () => (state.info.hosts || []).map((h) => h.name);
+// for the DNS/IP field: registry host names AND their IPs
+function hostAddrList() {
+  const out = [];
+  for (const h of state.info.hosts || []) {
+    out.push(h.name);
+    if (h.ip) out.push(h.ip);
+  }
+  return [...new Set(out)];
+}
+
+// Attr fields that reference a registry get autocomplete instead of a bare
+// text input: account fields offer the account registry, the network
+// indicator's address/source and lateral movement's endpoints offer the host
+// registry. Everything stays free-text — the registry is a suggestion, not a
+// constraint.
+function attrControl(prefix, typeKey, f, value = "") {
+  const name = `${prefix}:${f.key}`;
+  const hint = f.hint || "";
+  if (f.key === "account") return comboInput(name, accountNames(), hint, value);
+  if (typeKey === "netindicator" && f.key === "address")
+    return comboInput(name, hostAddrList(), hint, value);
+  if (typeKey === "netindicator" && f.key === "source")
+    return comboInput(name, hostNameList(), hint, value);
+  if (f.key === "source_host" || f.key === "dest_host")
+    return comboInput(name, hostNameList(), hint, value);
+  return textInput(name, hint, value);
+}
+
+// picking a registry account prefills its SID / account type into blank
+// sibling fields (typed values are never overwritten)
+function wireAccountPrefill(grid, prefix) {
+  const acct = grid.querySelector(`[name="${prefix}:account"]`);
+  if (!acct) return;
+  acct.addEventListener("change", () => {
+    const a = (state.info.accounts || []).find(
+      (x) => x.name.toLowerCase() === acct.value.trim().toLowerCase());
+    if (!a) return;
+    for (const [key, val] of [["sid", a.sid], ["account_type", a.account_type]]) {
+      const inp = grid.querySelector(`[name="${prefix}:${key}"]`);
+      if (inp && val && !inp.value.trim()) inp.value = val;
+    }
+  });
 }
 
 /* ---------- finding form (shared: add + edit) ---------- */
@@ -759,7 +1064,8 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
     const t = typeInfo(typeSelect.value);
     const current = (seed && seed.attrs) || {};
     attrsGrid.replaceChildren(...t.fields.map((f) =>
-      field(f.label, textInput(`attr:${f.key}`, f.hint || "", current[f.key] || ""))));
+      field(f.label, attrControl("attr", t.key, f, current[f.key] || ""))));
+    wireAccountPrefill(attrsGrid, "attr");
     // convenience: keep the stackable artifact name in sync with the path's
     // basename until the analyst types a name of their own
     const pathInp = attrsGrid.querySelector('[name="attr:path"]');
@@ -809,6 +1115,18 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
         if (h) picker.addHosts([h]);
       });
     }
+    // naming a registry account in the Account field mirrors it into the
+    // associated-accounts picker (the server links it regardless — this just
+    // keeps the form honest about what will be saved)
+    const acctInp = attrsGrid.querySelector('[name="attr:account"]');
+    if (acctInp) {
+      acctInp.addEventListener("change", () => {
+        const name = acctInp.value.trim().toLowerCase();
+        const a = (state.info.accounts || []).find(
+          (x) => x.name.toLowerCase() === name);
+        if (a) acctPicker.addAccounts([a]);
+      });
+    }
   }
   typeSelect.addEventListener("change", renderAttrFields);
 
@@ -819,6 +1137,10 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
   const picker = hostPicker(initialHosts, {
     label: "Affected host(s)",
     hint: "inherited from the step — adjust if it spans more or fewer hosts; 2+ = cross-host" });
+  const acctPicker = accountPicker(seed ? seed.accounts : [], {
+    label: "Associated account(s)",
+    hint: "accounts this finding involves — the one named in an Account field "
+      + "is linked automatically" });
 
   // hashes: md5 / sha1 / sha256 of the file this finding is about
   const HASHES = [["md5", "MD5", 32], ["sha1", "SHA-1", 40], ["sha256", "SHA-256", 64]];
@@ -868,6 +1190,7 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
     state.info.evidence.length ? field("Evidence it came from", evSelect) : null,
     attrsGrid,
     el("div", { class: "field wide" }, picker.el),
+    el("div", { class: "field wide" }, acctPicker.el),
     field("File hashes (optional)", hashGrid, true),
     field("Detail / evidence for this finding",
       el("textarea", { name: "detail" }, seed ? seed.detail : ""), true),
@@ -899,6 +1222,7 @@ function findingForm({ actionId, inheritHosts, inheritEvidence, existing, templa
         starred: starred ? 1 : 0,
         evidence_id: evSelect.value ? Number(evSelect.value) : null,
         host_ids: picker.ids(),
+        account_ids: acctPicker.ids(),
       };
       if (!payload.title) throw new Error("a title is required");
       if (existing) {
@@ -982,7 +1306,8 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
     : pendingShots("output",
         "📎 Screenshot(s) of the result — drop, choose, or paste. Add several views if useful.");
 
-  const toolField = field("Tool", textInput("tool",
+  const toolField = field("Tool", comboInput("tool",
+    state.info.tools || [],
     "Registry Explorer, Timeline Explorer …", seed ? seed.tool : ""));
 
   // hosts belong to evidence/collections, not individual steps — the step's
@@ -1017,7 +1342,8 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
     const renderAttrs = () => {
       const t = typeInfo(typeSel.value);
       attrs.replaceChildren(...t.fields.map((f) =>
-        field(f.label, textInput(`qfattr:${f.key}`, f.hint || ""))));
+        field(f.label, attrControl("qfattr", t.key, f))));
+      wireAccountPrefill(attrs, "qfattr");
       const pathInp = attrs.querySelector('[name="qfattr:path"]');
       const nameInp = attrs.querySelector('[name="qfattr:artifact"]');
       if (pathInp && nameInp) {
@@ -1152,13 +1478,47 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
 
 /* ---------- investigation tree ---------- */
 
+// a jump target nested inside a collapsed action has no DOM node — expand the
+// chain of actions above it first so the scroll can land. `ref` is "A5"/"F12".
+function expandToNode(roots, ref) {
+  const walk = (actions, anc) => {
+    for (const a of actions) {
+      if ("A" + a.id === ref) {
+        for (const k of [...anc, "A" + a.id]) state.collapsed.delete(k);
+        return true;
+      }
+      const chain = [...anc, "A" + a.id];
+      for (const f of a.findings || []) {
+        if ("F" + f.id === ref) {
+          for (const k of chain) state.collapsed.delete(k);
+          return true;
+        }
+        if (walk(f.actions || [], chain)) return true;
+      }
+    }
+    return false;
+  };
+  walk(roots, []);
+}
+
 async function renderInvestigation(view) {
   const tree = await api("/api/tree");
   view.replaceChildren();
 
-  const addBtn = el("button", { class: "btn primary" }, "+ Log action");
-  addBtn.addEventListener("click", () => openFormModal("Log a step", (close) =>
-    actionForm({ done: (id) => { close(); reload(`node-A${id}`); }, close })));
+  // the tree opens collapsed: headlines first, drill in as needed
+  if (!state.collapsedInit) {
+    state.collapsed = new Set(allActionKeys(tree.roots));
+    state.collapsedInit = true;
+  }
+  if (state.jumpTo) expandToNode(tree.roots, state.jumpTo.replace(/^node-/, ""));
+
+  const logActionBtn = () => {
+    const b = el("button", { class: "btn primary" }, "+ Log action");
+    b.addEventListener("click", () => openFormModal("Log a step", (close) =>
+      actionForm({ done: (id) => { close(); reload(`node-A${id}`); }, close })));
+    return b;
+  };
+  const addBtn = logActionBtn();
   const hasActions = tree.roots.length > 0;
   const collapseAll = el("button", { class: "btn small ghost" }, "Collapse all");
   collapseAll.addEventListener("click", () => {
@@ -1185,6 +1545,8 @@ async function renderInvestigation(view) {
     return;
   }
   for (const a of tree.roots) view.append(actionCard(a));
+  view.append(el("div", { class: "toolbar", style: "margin-top:10px" },
+    logActionBtn()));
   if (tree.unattached.length) {
     view.append(el("h3", {}, "Unattached findings"));
     for (const f of tree.unattached) view.append(findingCard(f));
@@ -1219,6 +1581,51 @@ function allActionKeys(nodes, out = []) {
     for (const f of a.findings || []) allActionKeys(f.actions || [], out);
   }
   return out;
+}
+
+// Headlines of every finding in a collapsed action's drill-down subtree (the
+// same set the 🔎 count rolls up), so the collapsed tree still tells the story
+// without opening each step. Clicking a headline expands the chain of actions
+// above that finding and scrolls to it.
+function collapsedFindingRows(action) {
+  const flat = [];
+  const walk = (a, depth, ancestors) => {
+    for (const f of a.findings || []) {
+      flat.push({ f, depth, ancestors });
+      for (const child of f.actions || [])
+        walk(child, depth + 1, [...ancestors, "A" + child.id]);
+    }
+  };
+  walk(action, 0, ["A" + action.id]);
+  if (!flat.length) return null;
+
+  const CAP = 8;
+  const rows = flat.slice(0, CAP).map(({ f, depth, ancestors }) => {
+    const t = typeInfo(f.ftype);
+    return el("div", {
+      class: "collapsed-finding clickable",
+      style: depth ? `padding-left:${12 + depth * 14}px` : null,
+      title: "expand to this finding",
+      onclick: (e) => {
+        e.stopPropagation();
+        for (const k of ancestors) state.collapsed.delete(k);
+        renderKeepingInView(`node-F${f.id}`);
+      } },
+      el("span", { class: `ref ${f.ftype === "lead" ? "l" : "f"}` }, `F${f.id}`),
+      el("span", { class: "tag" }, t.label),
+      f.starred ? el("span", { class: "star-mark" }, "★") : null,
+      el("span", { class: "collapsed-finding-title" }, f.title));
+  });
+  if (flat.length > CAP) {
+    rows.push(el("div", { class: "collapsed-finding more clickable",
+      title: "expand the step to see all findings",
+      onclick: (e) => {
+        e.stopPropagation();
+        state.collapsed.delete("A" + action.id);
+        renderKeepingInView(`node-A${action.id}`);
+      } }, `… ${flat.length - CAP} more`));
+  }
+  return el("div", { class: "collapsed-findings" }, rows);
 }
 
 function actionCard(a) {
@@ -1257,7 +1664,11 @@ function actionCard(a) {
       ? el("span", { class: "meta", style: "color: var(--danger)" }, `exit ${a.exit_code}`) : null,
     el("span", { class: "meta node-time" }, a.performed_at));
   card.append(head);
-  if (collapsed) return card;
+  if (collapsed) {
+    const rows = collapsedFindingRows(a);
+    if (rows) card.append(rows);
+    return card;
+  }
 
   // The command / steps-to-reproduce body can be long (e.g. a multi-line
   // hunt query); collapse it behind a compact summary when it is, so it does
@@ -1344,6 +1755,15 @@ function findingCard(f) {
   const leadDone = isLead && f.item_total && f.item_resolved === f.item_total;
   const leadProgress = isLead ? el("span", { class: "lead-progress" + (leadDone ? " done" : "") },
     f.item_total ? `${f.item_resolved} of ${f.item_total} triaged` : "no items yet") : null;
+  // non-lead findings: surface their follow-up checklist state in the head
+  // (visible even collapsed) so open follow-ups can't be overlooked
+  const fuOpen = !isLead && f.item_total
+    ? f.item_total - (f.item_resolved || 0) : 0;
+  const fuChip = !isLead && f.item_total
+    ? el("span", { class: "lead-progress" + (fuOpen ? "" : " done"),
+        title: "follow-up checklist on this finding" },
+        fuOpen ? `📋 ${fuOpen} open` : "📋 all done")
+    : null;
   const evidence = state.info.evidence.find((e) => e.id === f.evidence_id);
   const evidenceTag = evidence ? el("span", { class: "evidence-tag", title: "jump to evidence",
     onclick: (ev) => { ev.stopPropagation(); state.tab = "evidence"; render(); } },
@@ -1356,10 +1776,12 @@ function findingCard(f) {
     el("span", { class: "node-title", title: f.title }, f.title),
     evidenceTag,
     hostsInline(f.affected_hosts),
+    accountsInline(f.accounts),
     el("span", { class: "spacer" }),
     collapsed && nAct ? el("span", { class: "meta find-count", title: "follow-up actions" },
       `↳ ${nAct}`) : null,
     leadProgress,
+    fuChip,
     f.event_time ? el("span", { class: "meta node-time" }, timeWithKind(f)) : null));
   if (collapsed) return card;
 
@@ -1399,8 +1821,11 @@ function findingCard(f) {
       card.append(labeledBlock("Detail", f.detail));
     }
   }
-  // a lead's triage worklist lives right in the card, editable in place
+  // a lead's triage worklist lives right in the card, editable in place;
+  // every other finding gets a follow-up checklist behind a collapsed summary
+  // (same items machinery, same Investigate wiring)
   if (isLead) card.append(leadWorklist(f));
+  else card.append(followupSection(f));
 
   const strip = attachmentStrip(f.attachments, () => reload(`node-F${f.id}`));
   if (strip) card.append(strip);
@@ -1650,6 +2075,158 @@ function openHostPanel(h, detail) {
     section("Findings", findRows),
     el("button", { class: "btn small", onclick: () => overlay.remove() }, "Close")));
   document.body.append(overlay);
+}
+
+/* ---------- accounts (registry, like Hosts) ---------- */
+
+async function renderAccounts(view) {
+  const accounts = await api("/api/accounts");
+  view.replaceChildren();
+  view.append(el("div", { class: "toolbar" },
+    el("span", { class: "hint" },
+      "User/service accounts seen in the case. Account and Lateral Movement " +
+      "findings register their account here automatically; edit any field " +
+      "inline. Use the blank row to add suspects up front — paste a " +
+      "newline/comma list into the Name cell to add many at once.")));
+
+  const err = el("div", { class: "form-error" });
+  const cols = [
+    { key: "name", ph: "account name", cls: "" },
+    { key: "domain", ph: "CORP", cls: "" },
+    { key: "sid", ph: "S-1-5-21-…", cls: "mono" },
+    { key: "account_type", ph: "Admin / Domain Admin / User / service", cls: "" },
+    { key: "status", select: true },
+    { key: "notes", ph: "notes", cls: "" },
+  ];
+  const HEAD = { account_type: "Type", sid: "SID", status: "Status" };
+
+  const tbody = el("tbody", {});
+  const table = el("table", { class: "host-grid" },
+    el("thead", {}, el("tr", {},
+      el("th", {}, "Ref"),
+      ...cols.map((c) => el("th", {},
+        HEAD[c.key] || c.key[0].toUpperCase() + c.key.slice(1))),
+      el("th", {}, "Findings"),
+      el("th", {}, ""))),
+    tbody);
+
+  const statusSelect = (value) => el("select", { class: "cell cell-select" },
+    STATUS_OPTS.map(([v, label]) =>
+      el("option", { value: v, selected: (value || "") === v ? "" : null }, label)));
+
+  function liveRow(a) {
+    const tr = el("tr", { class: "host-row" + statusClass(a.status) });
+    tr.append(el("td", { class: "mono host-ref" }, String(a.id)));
+    for (const c of cols) {
+      const inp = c.select ? statusSelect(a[c.key])
+        : el("input", { class: "cell " + c.cls, value: a[c.key] || "",
+            placeholder: c.ph, autocomplete: "off" });
+      inp.addEventListener("change", async () => {
+        const val = inp.value.trim();
+        if (c.key === "name" && !val) {
+          inp.value = a.name; return;  // don't allow blanking the name
+        }
+        err.textContent = "";
+        try {
+          await api(`/api/accounts/${a.id}`, { method: "PATCH", body: { [c.key]: val } });
+          a[c.key] = val;
+          if (c.key === "status") tr.className = "host-row" + statusClass(val);
+          flashSaved(inp);
+        } catch (e) { err.textContent = String(e.message || e); inp.value = a[c.key] || ""; }
+      });
+      tr.append(el("td", {}, inp));
+    }
+    tr.append(el("td", {}, a.finding_count
+      ? accountFindingsLink(a) : el("span", { class: "meta" }, "0")));
+    tr.append(el("td", {}, el("button", { class: "row-del", title: "delete account",
+      onclick: async () => {
+        if (!confirm(`Delete ${a.name}? It stays in the record (soft-delete), just hidden.`)) return;
+        try {
+          await api(`/api/accounts/${a.id}`, { method: "DELETE" });
+          tr.remove();
+          await refreshInfo();
+          updateCounts();
+        } catch (e) { err.textContent = String(e.message || e); }
+      } }, "✕")));
+    return tr;
+  }
+
+  function newRow() {
+    const tr = el("tr", { class: "host-row host-new" });
+    const inputs = {};
+    tr.append(el("td", { class: "mono host-ref" }, "＋"));
+    let committing = false;
+    const commit = async () => {
+      const name = inputs.name.value.trim();
+      if (committing || !name) return;
+      committing = true;
+      // support pasting a whole list into the name cell
+      const names = name.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+      err.textContent = "";
+      try {
+        const shared = { domain: inputs.domain.value.trim(),
+          sid: inputs.sid.value.trim(),
+          account_type: inputs.account_type.value.trim(),
+          status: inputs.status.value, notes: inputs.notes.value.trim() };
+        const body = names.length > 1
+          ? { names, status: shared.status } : { name: names[0], ...shared };
+        await api("/api/accounts", { method: "POST", body });
+        await refreshInfo();
+        updateCounts();
+        const fresh = await api("/api/accounts");
+        tbody.replaceChildren(...fresh.map(liveRow), newRow());
+        const nn = tbody.querySelector(".host-new .cell");
+        if (nn) nn.focus();
+      } catch (e) { err.textContent = String(e.message || e); committing = false; }
+    };
+    for (const c of cols) {
+      const inp = c.select ? statusSelect("")
+        : el("input", { class: "cell " + c.cls,
+            placeholder: c.key === "name" ? "add an account…" : c.ph,
+            autocomplete: "off" });
+      inputs[c.key] = inp;
+      if (c.key === "name") inp.addEventListener("change", commit);
+      tr.append(el("td", {}, inp));
+    }
+    tr.append(el("td", {}, el("span", { class: "meta" }, "")));
+    tr.append(el("td", {}, ""));
+    return tr;
+  }
+
+  tbody.replaceChildren(...accounts.map(liveRow), newRow());
+  view.append(el("div", { class: "table-wrap" }, table), err);
+  if (!accounts.length) {
+    view.append(el("p", { class: "empty-hint", style: "text-align:left" },
+      "No accounts yet — they appear automatically when a Compromised Account " +
+      "or Lateral Movement finding names one, or add suspects in the blank row above."));
+  }
+}
+
+function accountFindingsLink(a) {
+  const link = el("a", { class: "ref-link", href: "#" }, String(a.finding_count));
+  link.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    const findings = await api(`/api/account_findings?id=${a.id}`);
+    const overlay = el("div", { class: "lightbox", onclick: () => overlay.remove() });
+    const jump = (nodeId) => (ev2) => {
+      ev2.preventDefault(); overlay.remove();
+      state.tab = "investigation"; state.jumpTo = nodeId; render();
+    };
+    overlay.append(el("div", { class: "host-panel", onclick: (e) => e.stopPropagation() },
+      el("h3", {}, `👤 ${a.name}`),
+      el("p", { class: "hint" },
+        [a.domain, a.sid, a.account_type, a.status].filter(Boolean).join(" · ")
+        || "no details recorded yet"),
+      el("h4", { class: "host-panel-h" }, "Findings"),
+      ...findings.map((f) =>
+        el("div", { class: "host-panel-row" },
+          el("a", { class: "ref-link", href: "#", onclick: jump(`node-F${f.id}`) }, `F${f.id}`),
+          " ", el("span", {}, `[${typeInfo(f.ftype).label}] ${f.title}`),
+          f.event_time ? el("span", { class: "meta" }, ` · ${f.event_time}`) : null)),
+      el("button", { class: "btn small", onclick: () => overlay.remove() }, "Close")));
+    document.body.append(overlay);
+  });
+  return link;
 }
 
 /* ---------- coverage (hosts × analysis — "did we look at everything?") ---------- */
@@ -1938,9 +2515,26 @@ async function renderLeads(view) {
       el("p", { class: "empty-title" }, "No leads yet"),
       el("p", { class: "empty-hint" },
         "Create a lead for a worklist you need to triage, then add its items.")));
+  } else {
+    for (const L of leads) view.append(leadCard(L));
+  }
+
+  // case-wide follow-up queue: open checklist items living on regular findings
+  const fus = await api("/api/followups");
+  view.append(el("h3", { style: "margin-top:22px" }, "Open follow-ups"),
+    el("p", { class: "hint" },
+      "Checklist items on individual findings (add them from a finding's "
+      + "“Follow-ups” section in the tree) that are still open."));
+  if (!fus.length) {
+    view.append(el("p", { class: "hint" }, "✓ nothing outstanding"));
     return;
   }
-  for (const L of leads) view.append(leadCard(L));
+  view.append(el("div", { class: "card" }, ...fus.map((it) =>
+    el("div", { class: "host-panel-row" },
+      refLink(`F${it.lead_id}`, `node-F${it.lead_id}`),
+      " ", el("span", { class: "meta" }, `[${typeInfo(it.owner_ftype).label}]`),
+      " ", el("span", {}, it.owner_title, " — "),
+      el("b", {}, it.label)))));
 }
 
 function leadCard(L) {
@@ -1966,6 +2560,19 @@ function leadCard(L) {
   }
   card.append(leadWorklist(L));
   return card;
+}
+
+// Follow-up checklist on a non-lead finding: the same worklist table, tucked
+// behind a one-line summary. Auto-opens while anything is still open.
+function followupSection(f) {
+  const total = f.item_total || 0;
+  const open = total - (f.item_resolved || 0);
+  const label = total
+    ? `📋 Follow-ups — ${open ? `${open} of ${total} open` : `all ${total} done`}`
+    : "📋 Add follow-ups…";
+  return el("details", { class: "followups", ...(open ? { open: "" } : {}) },
+    el("summary", { class: "collapse-hint" }, label),
+    leadWorklist(f));
 }
 
 // the interactive worklist table (status / item / resolved-by / delete + an
@@ -2311,7 +2918,9 @@ async function renderEvidence(view) {
           el("td", {}, c.name),
           el("td", {}, c.tool),
           el("td", {}, (c.hosts || []).length
-            ? el("span", { class: "host-count-chip" }, `🖥 ${c.hosts.length}`) : ""),
+            ? el("span", { class: "host-count-chip",
+                title: (c.hosts || []).map((h) => h.name).join("\n") },
+                `🖥 ${c.hosts.length}`) : ""),
           el("td", {}, c.scope),
           el("td", {},
             el("button", { class: "btn small ghost",
@@ -2413,8 +3022,11 @@ async function renderEvidence(view) {
       el("td", { class: "mono" }, `E${e.id}`),
       el("td", {}, e.label),
       el("td", {}, e.kind),
-      el("td", {}, (e.hosts || []).map((h) =>
-        el("span", { class: "host-chip mini" }, h.name))),
+      el("td", {}, (e.hosts || []).length
+        ? el("span", { class: "host-count-chip",
+            title: (e.hosts || []).map((h) => h.name).join("\n") },
+            `🖥 ${e.hosts.length}`)
+        : ""),
       el("td", { class: "mono" }, e.source),
       el("td", { class: e.acquired_by || e.acquired_at ? "" : "cov-gap",
         title: e.acquisition || "" },

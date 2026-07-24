@@ -252,3 +252,39 @@ def all_attr_fields() -> dict[str, Field]:
 
 # Hash algorithms carried on findings, in display order: (attrs key, label).
 HASH_FIELDS = (("md5", "MD5"), ("sha1", "SHA-1"), ("sha256", "SHA-256"))
+
+
+# Common DFIR tools / actions, seeded into the Step modal's Tool autocomplete so
+# a fresh case doesn't start with an empty suggestion list. These are only
+# suggestions — any tool a case actually uses is merged in on top, and the field
+# stays free-text so analysts can always type something not listed here.
+DEFAULT_TOOLS: tuple[str, ...] = (
+    # Eric Zimmerman suite
+    "Registry Explorer", "Timeline Explorer", "MFTECmd", "PECmd", "LECmd",
+    "JLECmd", "AmcacheParser", "AppCompatCacheParser", "RECmd", "RBCmd",
+    "SBECmd", "SrumECmd", "WxTCmd", "EvtxECmd", "RecentFileCacheParser",
+    "bstrings", "Hasher",
+    # Memory forensics
+    "Volatility", "Volatility 3", "MemProcFS", "Rekall",
+    # Triage / collection / IR platforms
+    "KAPE", "Velociraptor", "GRR", "CyLR", "FTK Imager", "Arsenal Image Mounter",
+    # Full-suite forensics
+    "Autopsy", "X-Ways Forensics", "Magnet AXIOM", "EnCase",
+    # Timelining
+    "log2timeline / Plaso", "Timesketch",
+    # Event-log analytics
+    "Hayabusa", "Chainsaw", "Zircolite", "DeepBlueCLI", "EvtxECmd",
+    "Event Log Explorer", "RegRipper",
+    # Network
+    "Wireshark", "NetworkMiner", "Zeek", "Suricata", "tshark",
+    # Malware / RE
+    "YARA", "capa", "PEStudio", "Detect It Easy", "Ghidra", "IDA Pro",
+    "x64dbg", "oletools (olevba)", "pdf-parser", "CyberChef",
+    # Sysinternals
+    "Autoruns", "Process Monitor", "Process Explorer", "TCPView", "Sysmon",
+    "Strings",
+    # Browser / artifact parsers
+    "Hindsight", "BrowsingHistoryView", "ExifTool", "SQLite Browser",
+    # Live-response / shells
+    "PowerShell", "cmd.exe", "bash",
+)

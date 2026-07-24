@@ -162,7 +162,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"active": True, "meta": case.meta(),
                             "evidence": case.evidence(), "counts": case.counts(),
                             "hosts": case.hosts(), "collections": case.collections(),
+                            "accounts": case.accounts(),
                             "file": os.path.basename(case.path),
+                            "tools": case.tool_suggestions(),
                             "types": _types_payload()})
             elif url.path == "/api/tree":
                 self._json({"roots": case.tree(),
@@ -176,6 +178,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(case.hosts())
             elif url.path == "/api/collections":
                 self._json(case.collections())
+            elif url.path == "/api/accounts":
+                self._json(case.accounts())
+            elif url.path == "/api/account_findings":
+                aid = int((q.get("id") or [0])[0])
+                self._json(case.findings_for_account(aid))
             elif url.path == "/api/coverage":
                 self._json(case.coverage())
             elif url.path == "/api/stack":
@@ -184,6 +191,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(case.artifact_stacks())
             elif url.path == "/api/leads":
                 self._json(case.leads())
+            elif url.path == "/api/followups":
+                self._json(case.followups())
             elif url.path == "/api/host_findings":
                 hid = int((q.get("id") or [0])[0])
                 self._json(case.findings_for_host(hid))
@@ -249,6 +258,11 @@ class Handler(BaseHTTPRequestHandler):
                     case.soft_delete_host(int(m.group(1)))
                     self._json({"ok": True})
                     return
+                m = re.fullmatch(r"/api/accounts/(\d+)", url.path)
+                if m:
+                    case.soft_delete_account(int(m.group(1)))
+                    self._json({"ok": True})
+                    return
                 m = re.fullmatch(r"/api/lead_items/(\d+)", url.path)
                 if m:
                     case.soft_delete_lead_item(int(m.group(1)))
@@ -268,7 +282,8 @@ class Handler(BaseHTTPRequestHandler):
                     hashes=body.get("hashes") or {},
                     starred=bool(body.get("starred")),
                     evidence_id=body.get("evidence_id"),
-                    host_ids=self._host_ids(case, body))
+                    host_ids=self._host_ids(case, body),
+                    account_ids=self._account_ids(case, body))
                 self._json({"id": fid}, 201)
             elif method == "POST" and url.path == "/api/evidence":
                 eid = case.add_evidence(
@@ -283,6 +298,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"id": eid}, 201)
             elif method == "POST" and url.path == "/api/hosts":
                 self._add_hosts(case, body)
+            elif method == "POST" and url.path == "/api/accounts":
+                names = body.get("names") or ([body["name"]] if body.get("name") else [])
+                if not names:
+                    raise CaseError("provide an account name or a 'names' list")
+                ids = [case.add_account(
+                    n, domain=body.get("domain", ""), sid=body.get("sid", ""),
+                    account_type=body.get("account_type", ""),
+                    status=body.get("status", ""), notes=body.get("notes", ""))
+                    for n in names if n and n.strip()]
+                self._json({"ids": ids, "count": len(ids)}, 201)
             elif method == "POST" and re.fullmatch(
                     r"/api/collections/(\d+)/expand", url.path):
                 cid = int(url.path.split("/")[3])
@@ -302,7 +327,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             elif method == "PATCH":
                 m = re.fullmatch(
-                    r"/api/(actions|findings|hosts|evidence|collections)/(\d+)",
+                    r"/api/(actions|findings|hosts|evidence|collections"
+                    r"|accounts)/(\d+)",
                     url.path)
                 if not m:
                     self._error("not found", 404)
@@ -316,11 +342,27 @@ class Handler(BaseHTTPRequestHandler):
                     self._patch_collection(case, row_id, body)
                 elif table == "hosts":
                     case.update_host(row_id, **body)
+                elif table == "accounts":
+                    case.update_account(row_id, **body)
                 else:
                     self._patch_finding(case, row_id, body)
                 self._json({"ok": True})
             else:
                 self._error("not found", 404)
+
+    @staticmethod
+    def _account_ids(case: Case, body: dict) -> list[int]:
+        """Merge explicit account_ids with resolved/auto-created account_names."""
+        ids = list(body.get("account_ids") or [])
+        names = body.get("account_names") or []
+        if names:
+            ids += case.resolve_accounts(names, create=True)
+        seen, out = set(), []
+        for i in ids:
+            if i not in seen:
+                seen.add(i)
+                out.append(i)
+        return out
 
     @staticmethod
     def _host_ids(case: Case, body: dict) -> list[int]:
@@ -339,13 +381,17 @@ class Handler(BaseHTTPRequestHandler):
     def _patch_finding(self, case: Case, fid: int, body: dict) -> None:
         body = dict(body)
         has_hosts = "host_ids" in body or "host_names" in body
+        has_accounts = "account_ids" in body or "account_names" in body
         host_ids = self._host_ids(case, body) if has_hosts else None
-        body.pop("host_ids", None)
-        body.pop("host_names", None)
+        account_ids = self._account_ids(case, body) if has_accounts else None
+        for key in ("host_ids", "host_names", "account_ids", "account_names"):
+            body.pop(key, None)
         if body:
             case.update_finding(fid, **body)
         if has_hosts:
             case.set_finding_hosts(fid, host_ids)
+        if has_accounts:
+            case.set_finding_accounts(fid, account_ids)
 
     def _patch_with_hosts(self, case: Case, kind: str, row_id: int,
                           body: dict) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import mimetypes
 import os
+import shlex
 import subprocess
 import sys
 
@@ -126,15 +127,22 @@ def cmd_evidence(args) -> int:
                 host_ids = case.collection_host_ids(collection_id)
             else:
                 host_ids = []
+            sha = args.sha256 or ""
+            if args.hash_file:
+                sha = db.hash_file(args.hash_file)["sha256"]
             eid = case.add_evidence(args.label, kind=args.kind or "",
                                     source=args.source or "",
-                                    sha256=args.sha256 or "",
+                                    sha256=sha,
+                                    acquired_by=args.acquired_by or "",
+                                    acquired_at=args.acquired_at or "",
+                                    acquisition=args.acquisition or "",
                                     notes=args.note or "",
                                     collection_id=collection_id,
                                     host_ids=host_ids)
             where = f" (collection C{collection_id})" if collection_id else ""
             on = f" from {len(host_ids)} host(s)" if host_ids else ""
-            print(f"E{eid} added — {args.label}{where}{on}")
+            hashed = f"\n   sha256 {sha}" if args.hash_file else ""
+            print(f"E{eid} added — {args.label}{where}{on}{hashed}")
         elif args.evidence_cmd == "edit":
             kind, eid = db.resolve_ref(args.ref)
             if kind != "E":
@@ -142,10 +150,15 @@ def cmd_evidence(args) -> int:
             fields = {}
             for attr, col in (("label", "label"), ("kind", "kind"),
                               ("source", "source"), ("sha256", "sha256"),
+                              ("acquired_by", "acquired_by"),
+                              ("acquired_at", "acquired_at"),
+                              ("acquisition", "acquisition"),
                               ("note", "notes")):
                 val = getattr(args, attr)
                 if val is not None:
                     fields[col] = val
+            if args.hash_file:
+                fields["sha256"] = db.hash_file(args.hash_file)["sha256"]
             if args.collection is not None:
                 fields["collection_id"] = (None if args.collection.lower() == "none"
                                            else case.resolve_collection(args.collection))
@@ -173,6 +186,35 @@ def cmd_evidence(args) -> int:
                 print(line)
                 if e["source"]:
                     print(f"     source: {e['source']}")
+                custody = ", ".join(x for x in (
+                    e["acquired_by"] and f"by {e['acquired_by']}",
+                    e["acquired_at"] and f"at {e['acquired_at']}",
+                    e["acquisition"] and f"via {e['acquisition']}") if x)
+                if custody:
+                    print(f"     acquired: {custody}")
+    return 0
+
+
+_AUDIT_PREFIX = {"actions": "A", "findings": "F", "evidence": "E",
+                 "hosts": "H", "collections": "C"}
+
+
+def cmd_audit(args) -> int:
+    with open_case(args) as case:
+        rows = case.audit(args.ref, limit=args.limit)
+        if not rows:
+            print("no edits recorded" + (f" for {args.ref}" if args.ref else "")
+                  + " — everything still reads as originally written")
+            return 0
+        for r in rows:
+            prefix = _AUDIT_PREFIX.get(r["table_name"], r["table_name"] + " ")
+            what = f"{prefix}{r['row_id']}"
+            if r["op"] == "soft_delete":
+                print(f"{r['at']}  {what}  soft-deleted")
+                continue
+            print(f"{r['at']}  {what}  edited:")
+            for field_name, ch in r["changes"].items():
+                print(f"    {field_name}: {ch.get('from')!r} -> {ch.get('to')!r}")
     return 0
 
 
@@ -251,6 +293,62 @@ def cmd_host(args) -> int:
                                       h["status"].upper())
                 print(f"H{h['id']:>3}  {h['name']:<20}{extra}  "
                       f"({h['finding_count']} findings)")
+    return 0
+
+
+def cmd_account(args) -> int:
+    with open_case(args) as case:
+        if args.account_cmd == "add":
+            names = list(args.names)
+            if args.from_file:
+                names += _read_host_file(args.from_file)
+            if not names:
+                raise CaseError("give at least one account name (or --from FILE)")
+            for name in names:
+                acct_id = case.add_account(
+                    name, domain=args.domain or "", sid=args.sid or "",
+                    account_type=args.type or "", status=args.status or "",
+                    notes=args.note or "")
+                print(f"account {acct_id}  {name}")
+            print(f"{len(names)} account(s) registered")
+        elif args.account_cmd == "edit":
+            acct_id = case.resolve_account(args.ref)
+            fields = {k: v for k, v in (
+                ("name", args.name), ("domain", args.domain), ("sid", args.sid),
+                ("account_type", args.type), ("status", args.status),
+                ("notes", args.note)) if v is not None}
+            if not fields:
+                raise CaseError("nothing to change — pass --name/--sid/--type/…")
+            case.update_account(acct_id, **fields)
+            print(f"account {acct_id} updated")
+        elif args.account_cmd == "show":
+            acct_id = case.resolve_account(args.ref)
+            a = next(x for x in case.accounts() if x["id"] == acct_id)
+            print(f"account {a['id']}  {a['name']}")
+            for key, label in (("domain", "domain"), ("sid", "sid"),
+                               ("account_type", "type"), ("status", "status"),
+                               ("notes", "notes")):
+                if a[key]:
+                    print(f"  {label}: {a[key]}")
+            findings = case.findings_for_account(acct_id)
+            print(f"  findings naming this account: {len(findings)}")
+            for f in findings:
+                print(f"    F{f['id']} [{f['ftype']}] {f['title']}")
+        else:
+            accounts = case.accounts()
+            if not accounts:
+                print("no accounts registered — they auto-register from "
+                      "account/lateral findings, or 'vera account add jdoe …'")
+            for a in accounts:
+                extra = f"  {a['domain']}\\" if a["domain"] else "  "
+                extra = f"{extra}{a['sid']}" if a["sid"] else extra.rstrip("\\ ")
+                if a["account_type"]:
+                    extra += f"  [{a['account_type']}]"
+                if a["status"]:
+                    extra += "  " + c(_STATUS_COLOR.get(a["status"], "0"),
+                                      a["status"].upper())
+                print(f"{a['id']:>3}  {a['name']:<20}{extra}  "
+                      f"({a['finding_count']} findings)")
     return 0
 
 
@@ -392,6 +490,35 @@ def _action_host_ids(case: Case, hosts_arg, evidence_id) -> list[int]:
     return []
 
 
+def _record_command(args, command: str, output: str,
+                    exit_code: int | None) -> int:
+    """Log an executed/typed command as an action (shared by run and wrap)."""
+    with open_case(args) as case:
+        parent = None
+        if args.from_finding:
+            kind, parent = db.resolve_ref(args.from_finding)
+            if kind != "F":
+                raise CaseError("--from expects a finding reference like F3")
+        evidence_id = (case.resolve_evidence(args.evidence)
+                       if args.evidence else None)
+        collection_id = (case.resolve_collection(args.collection)
+                         if args.collection else None)
+        host_ids = _action_host_ids(case, args.hosts, evidence_id)
+        a = case.add_action(command, host=args.host or "",
+                            tool=args.tool or "", evidence_id=evidence_id,
+                            collection_id=collection_id, output=output,
+                            exit_code=exit_code, notes=args.note or "",
+                            parent_finding_id=parent, host_ids=host_ids)
+        where = f" (follow-up to {fid(parent)})" if parent else ""
+        captured = f", {len(output)} chars captured" if output else ""
+        on = f" on {len(host_ids)} host(s)" if host_ids else ""
+        print(f"{aid(a)} recorded{where}{captured}{on}")
+        if exit_code not in (None, 0):
+            print(f"   exit code {exit_code}")
+        _attach_files(case, "action", a, args.shot, "output")
+    return 0
+
+
 def cmd_run(args) -> int:
     output, exit_code = "", None
     if args.execute:
@@ -405,31 +532,34 @@ def cmd_run(args) -> int:
             sys.stderr.write(proc.stderr)
     else:
         output = _read_piped_stdin()
+    return _record_command(args, args.command, output, exit_code)
 
-    with open_case(args) as case:
-        parent = None
-        if args.from_finding:
-            kind, parent = db.resolve_ref(args.from_finding)
-            if kind != "F":
-                raise CaseError("--from expects a finding reference like F3")
-        evidence_id = (case.resolve_evidence(args.evidence)
-                       if args.evidence else None)
-        collection_id = (case.resolve_collection(args.collection)
-                         if args.collection else None)
-        host_ids = _action_host_ids(case, args.hosts, evidence_id)
-        a = case.add_action(args.command, host=args.host or "",
-                            tool=args.tool or "", evidence_id=evidence_id,
-                            collection_id=collection_id, output=output,
-                            exit_code=exit_code, notes=args.note or "",
-                            parent_finding_id=parent, host_ids=host_ids)
-        where = f" (follow-up to {fid(parent)})" if parent else ""
-        captured = f", {len(output)} chars captured" if output else ""
-        on = f" on {len(host_ids)} host(s)" if host_ids else ""
-        print(f"{aid(a)} recorded{where}{captured}{on}")
-        if exit_code not in (None, 0):
-            print(f"   exit code {exit_code}")
-        _attach_files(case, "action", a, args.shot, "output")
-    return 0
+
+def cmd_wrap(args) -> int:
+    """Run a command AND log it in one go: `vera wrap [--ev E3] -- cmd args…`.
+
+    The action records the exact command, its combined output (teed live to
+    the terminal), exit code, output hash, and timestamp — a contemporaneous
+    note that costs nothing beyond the prefix. Single quoted argument =
+    passed to the shell as-is (use that for pipelines); multiple arguments
+    are re-quoted with shlex so `vera wrap -- grep "two words" file` works."""
+    tokens = list(args.cmd or [])
+    if tokens and tokens[0] == "--":
+        tokens = tokens[1:]
+    if not tokens:
+        raise CaseError(
+            "give a command: vera wrap [--ev E3] -- <cmd> [args…] "
+            "(quote the whole thing if it contains a pipeline)")
+    command = tokens[0] if len(tokens) == 1 else shlex.join(tokens)
+    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            errors="replace")
+    lines: list[str] = []
+    for line in proc.stdout:            # tee: show live AND capture
+        sys.stdout.write(line)
+        lines.append(line)
+    proc.wait()
+    return _record_command(args, command, "".join(lines), proc.returncode)
 
 
 def cmd_manual(args) -> int:
@@ -509,11 +639,30 @@ def cmd_finding(args) -> int:
         else:
             host_ids = None
         hashes = _collect_hashes(args)
+        attrs = _collect_attrs(args)
+        if args.type == "lateral":
+            # movement is directional (attrs) but both endpoints also join the
+            # affected-hosts set — auto-link names that exist in the registry
+            linked = set(host_ids or [])
+            for key in ("source_host", "dest_host"):
+                name = (attrs.get(key) or "").strip()
+                if not name:
+                    continue
+                try:
+                    linked.add(case.resolve_host(name))
+                except CaseError:
+                    pass  # endpoint outside the registry (e.g. external box)
+            host_ids = sorted(linked)
+        account_refs = _parse_host_list(args.accounts)
+        account_ids = (case.resolve_accounts(account_refs, create=True)
+                       if account_refs else None)
         f = case.add_finding(args.title, ftype=args.type, action_id=action_id,
                              host=args.host or "", detail=args.detail or "",
                              event_time=args.time or "",
-                             attrs=_collect_attrs(args), starred=args.star,
-                             host_ids=host_ids or None, hashes=hashes)
+                             time_kind=args.time_kind or "",
+                             attrs=attrs, starred=args.star,
+                             host_ids=host_ids or None, hashes=hashes,
+                             account_ids=account_ids)
         label = types.FINDING_TYPES[args.type].label
         under = f" under {aid(action_id)}" if action_id else " (unattached)"
         stack = f" — affects {len(host_ids)} host(s)" if host_ids else ""
@@ -648,6 +797,34 @@ def cmd_lead(args) -> int:
     return 0
 
 
+def cmd_followup(args) -> int:
+    with open_case(args) as case:
+        op = getattr(args, "fu_cmd", None)
+        if op == "add":
+            finding_id = _resolve_finding_ref(args.ref)
+            for label in args.labels:
+                item_id = case.add_lead_item(finding_id, label)
+                print(f"item {item_id} added to F{finding_id}: {label}")
+        elif op == "done":
+            case.update_lead_item(args.item, status="triaged")
+            print(f"item {args.item} done")
+        elif op == "open":
+            case.update_lead_item(args.item, status="open")
+            print(f"item {args.item} reopened")
+        elif op == "rm":
+            case.soft_delete_lead_item(args.item)
+            print(f"item {args.item} removed")
+        else:
+            fus = case.followups()
+            if not fus:
+                print("✓ no open follow-ups")
+                return 0
+            for it in fus:
+                print(f"[{it['id']}] F{it['lead_id']} ({it['owner_ftype']}) "
+                      f"{it['owner_title']}  —  {it['label']}")
+    return 0
+
+
 def cmd_clone(args) -> int:
     kind, src_id = db.resolve_ref(args.ref)
     if kind not in ("A", "F"):
@@ -730,8 +907,8 @@ def cmd_show(args) -> int:
             star = " ★" if f["starred"] else ""
             print(f"{fid(f['id'])} [{ft.label if ft else f['ftype']}]{star}  {f['title']}")
             for key, label in (("host", "host"), ("event_time", "event time"),
-                               ("detail", "detail")):
-                if f[key]:
+                               ("time_kind", "time means"), ("detail", "detail")):
+                if f.get(key):
                     print(f"  {label}: {f[key]}")
             for k, v in f["attrs"].items():
                 if v:
@@ -854,6 +1031,9 @@ def cmd_edit(args) -> int:
                 fields["host"] = args.host
             if args.time is not None:
                 fields["event_time"] = args.time
+            if args.time_kind is not None:
+                fields["time_kind"] = ("" if args.time_kind == "none"
+                                       else args.time_kind)
             if args.type is not None:
                 if args.type not in types.FINDING_TYPES:
                     raise CaseError(f"unknown type {args.type!r}")
@@ -865,9 +1045,14 @@ def cmd_edit(args) -> int:
             new_attrs = _collect_attrs(args)
             if new_attrs:
                 fields["attrs"] = {**f["attrs"], **new_attrs}
-            if not fields:
+            account_refs = _parse_host_list(args.accounts)
+            if not fields and not account_refs:
                 raise CaseError("nothing to change")
-            case.update_finding(ref_id, **fields)
+            if fields:
+                case.update_finding(ref_id, **fields)
+            if account_refs:
+                case.set_finding_accounts(
+                    ref_id, case.resolve_accounts(account_refs, create=True))
         else:
             raise CaseError("edit expects A<n> or F<n>")
         print(f"{args.ref.upper()} updated")
@@ -939,6 +1124,12 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--kind", help="disk / memory / triage / logs ...")
     pa.add_argument("--source", help="original path or acquisition detail")
     pa.add_argument("--sha256")
+    pa.add_argument("--hash-file", metavar="PATH",
+                    help="compute the sha256 from a local copy of the evidence")
+    pa.add_argument("--acquired-by", help="who collected/acquired it")
+    pa.add_argument("--acquired-at", help="when it was acquired (UTC)")
+    pa.add_argument("--acquisition",
+                    help="how it was acquired — tool/method, e.g. 'KAPE triage'")
     pa.add_argument("--collection", metavar="REF",
                     help="collection/batch this evidence belongs to (C2 or name)")
     pa.add_argument("--hosts", action="append", metavar="LIST",
@@ -951,6 +1142,11 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--kind")
     pe.add_argument("--source")
     pe.add_argument("--sha256")
+    pe.add_argument("--hash-file", metavar="PATH",
+                    help="compute the sha256 from a local copy of the evidence")
+    pe.add_argument("--acquired-by", help="who collected/acquired it")
+    pe.add_argument("--acquired-at", help="when it was acquired (UTC)")
+    pe.add_argument("--acquisition", help="how it was acquired — tool/method")
     pe.add_argument("--note", help="notes")
     pe.add_argument("--collection", metavar="REF",
                     help="collection ref (C2 / name), or 'none' to detach")
@@ -993,6 +1189,36 @@ def build_parser() -> argparse.ArgumentParser:
     hs.add_argument("ref", help="H3, a host name, or an alias")
     hsub.add_parser("list", help="list registered hosts")
     p.set_defaults(func=cmd_host)
+
+    p = sub.add_parser("account",
+                       help="manage the account registry (auto-fed by "
+                            "account/lateral findings)")
+    asub = p.add_subparsers(dest="account_cmd", required=True)
+    aa = asub.add_parser("add", help="register one or more accounts")
+    aa.add_argument("names", nargs="*", help="account name(s), e.g. jdoe svc-backup")
+    aa.add_argument("--from", dest="from_file", metavar="FILE",
+                    help="read account names, one per line, from a file")
+    aa.add_argument("--domain")
+    aa.add_argument("--sid")
+    aa.add_argument("--type", help="Admin / Domain Admin / User / service …")
+    aa.add_argument("--status", choices=("unknown", "clean", "suspicious",
+                                         "compromised"),
+                    help="disposition (default: unknown)")
+    aa.add_argument("--note")
+    ae = asub.add_parser("edit", help="edit an account after adding it")
+    ae.add_argument("ref", help="account id or name")
+    ae.add_argument("--name", help="rename the account")
+    ae.add_argument("--domain")
+    ae.add_argument("--sid")
+    ae.add_argument("--type", help="Admin / Domain Admin / User / service …")
+    ae.add_argument("--status", choices=("unknown", "clean", "suspicious",
+                                         "compromised"))
+    ae.add_argument("--note")
+    ash = asub.add_parser("show",
+                          help="show an account and the findings naming it")
+    ash.add_argument("ref", help="account id or name")
+    asub.add_parser("list", help="list registered accounts")
+    p.set_defaults(func=cmd_account)
 
     p = sub.add_parser("collection", help="manage collections/batches (a sweep)")
     csub = p.add_subparsers(dest="collection_cmd", required=True)
@@ -1056,30 +1282,61 @@ def build_parser() -> argparse.ArgumentParser:
     lsub.add_parser("list", help="list leads and their items")
     p.set_defaults(func=cmd_lead)
 
+    p = sub.add_parser("followup",
+                       help="follow-up checklist on a finding (bare "
+                            "'vera followup' lists everything still open)")
+    fsub = p.add_subparsers(dest="fu_cmd", required=False)
+    fa = fsub.add_parser("add", help="add checklist item(s) to a finding")
+    fa.add_argument("ref", help="the finding to follow up on, e.g. F70")
+    fa.add_argument("labels", nargs="+",
+                    help="one or more items, e.g. \"4624s on WKSTN01\"")
+    fd = fsub.add_parser("done", help="mark an item done (triaged)")
+    fd.add_argument("item", type=int, help="the item id")
+    fo = fsub.add_parser("open", help="reopen an item")
+    fo.add_argument("item", type=int, help="the item id")
+    fr = fsub.add_parser("rm", help="remove an item (soft-delete)")
+    fr.add_argument("item", type=int, help="the item id")
+    fsub.add_parser("list", help="list open follow-ups across all findings")
+    p.set_defaults(func=cmd_followup)
+
     p = sub.add_parser("coverage", help="per-host analysis rollup — spot hosts "
                                         "nobody has examined yet")
     p.set_defaults(func=cmd_coverage)
+
+    def _step_context_flags(p):
+        """Context flags shared by every command-step logger (run / wrap)."""
+        p.add_argument("--hosts", action="append", metavar="LIST",
+                       help="host(s) examined — registry refs (RD03 / H3), "
+                            "comma/space list, must already exist "
+                            "('vera host add' first)")
+        p.add_argument("--host", help=argparse.SUPPRESS)  # deprecated free-text
+        p.add_argument("--tool", help="tool name (default: first word of command)")
+        p.add_argument("--evidence", "--ev", metavar="REF",
+                       help="evidence used (E2 or label substring)")
+        p.add_argument("--collection", metavar="REF",
+                       help="collection/batch this action ran against (C2 or name)")
+        p.add_argument("--from", dest="from_finding", metavar="F#",
+                       help="finding that prompted this action")
+        p.add_argument("--note")
+        p.add_argument("--shot", action="append", metavar="FILE",
+                       help="screenshot to attach as output (repeatable)")
 
     p = sub.add_parser("run", help="log a command/tool you ran "
                                    "(pipe its output in to capture it)")
     p.add_argument("command", help="the exact command line")
     p.add_argument("-x", "--execute", action="store_true",
                    help="have vera execute the command and capture its output")
-    p.add_argument("--hosts", action="append", metavar="LIST",
-                   help="host(s) examined — registry refs (RD03 / H3), comma/space "
-                        "list, must already exist ('vera host add' first)")
-    p.add_argument("--host", help=argparse.SUPPRESS)  # deprecated free-text label
-    p.add_argument("--tool", help="tool name (default: first word of command)")
-    p.add_argument("--evidence", metavar="REF",
-                   help="evidence used (E2 or label substring)")
-    p.add_argument("--collection", metavar="REF",
-                   help="collection/batch this action ran against (C2 or name)")
-    p.add_argument("--from", dest="from_finding", metavar="F#",
-                   help="finding that prompted this action")
-    p.add_argument("--note")
-    p.add_argument("--shot", action="append", metavar="FILE",
-                   help="screenshot to attach as output (repeatable)")
+    _step_context_flags(p)
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("wrap", help="run a command AND log it in one go — "
+                                    "output, exit code, hash, timestamp all "
+                                    "captured (put the command after --)")
+    _step_context_flags(p)
+    p.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- command …",
+                   help="the command to run; quote the whole thing if it "
+                        "contains a pipeline")
+    p.set_defaults(func=cmd_wrap)
 
     p = sub.add_parser("manual", help="log a GUI/tool step with no command line "
                                       "(e.g. Registry Explorer, Timeline Explorer)")
@@ -1124,8 +1381,15 @@ def build_parser() -> argparse.ArgumentParser:
                        help="affected host(s) — registry refs (RD03 / H3), comma/"
                             "space list, must already exist. Omit to inherit the "
                             "action's host(s). 2+ stacks the finding across hosts.")
+        p.add_argument("--accounts", action="append", metavar="LIST",
+                       help="associated account(s) — names or ids, comma/space "
+                            "list; unknown names are registered automatically")
         p.add_argument("--time", help="when it happened in the incident "
-                                      "(drives the timeline)")
+                                      "(drives the timeline; UTC)")
+        p.add_argument("--time-kind", dest="time_kind",
+                       choices=[k for k in db.TIME_KINDS if k],
+                       help="what the time MEANS (a shimcache time is "
+                            "'modified', not 'executed')")
         p.add_argument("-d", "--detail", help="longer description")
         p.add_argument("--md5", help="MD5 of the file this finding is about")
         p.add_argument("--sha1", help="SHA-1 of the file")
@@ -1141,6 +1405,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("log", help="show the investigation tree")
     p.set_defaults(func=cmd_log)
 
+    p = sub.add_parser("audit", help="show the append-only edit history "
+                                     "(what changed after it was written)")
+    p.add_argument("ref", nargs="?",
+                   help="limit to one record: A4 / F2 / E1 / H3 / C1")
+    p.add_argument("--limit", type=int, default=200)
+    p.set_defaults(func=cmd_audit)
+
     p = sub.add_parser("show", help="show an action, finding, evidence, or host")
     p.add_argument("ref", help="A4, F2, E1, or H3")
     p.set_defaults(func=cmd_show)
@@ -1152,6 +1423,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--detail")
     p.add_argument("--host")
     p.add_argument("--time", help="performed-at (action) / event time (finding)")
+    p.add_argument("--time-kind", dest="time_kind",
+                   choices=[k for k in db.TIME_KINDS if k] + ["none"],
+                   help="what a finding's event time means ('none' to clear)")
     p.add_argument("--command")
     p.add_argument("--tool")
     p.add_argument("-t", "--type", help="change finding type")
@@ -1160,6 +1434,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--on", metavar="A#", help=argparse.SUPPRESS)
     p.add_argument("--star", action="store_true")
     p.add_argument("--unstar", action="store_true")
+    p.add_argument("--accounts", action="append", metavar="LIST",
+                   help="replace a finding's associated account(s) — names or "
+                        "ids, comma/space list; unknown names are registered")
     _add_attr_flags(p)
     p.set_defaults(func=cmd_edit)
 

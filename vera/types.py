@@ -130,6 +130,33 @@ _register(FindingType(
                        _attrs(f).get("source", ""), f.get("detail", "")],
 ))
 
+# Movement is DIRECTIONAL — the affected-hosts set can't say which way it
+# went, so source/destination live here as attrs while both hosts are also
+# linked (m2m) for stacking. Entry layers auto-link registry hosts matching
+# the source/dest names.
+_register(FindingType(
+    key="lateral",
+    label="Lateral Movement",
+    view="Lateral Movement",
+    group="indicator",
+    fields=(
+        Field("source_host", "Source Host", "where the movement came FROM"),
+        Field("dest_host", "Destination Host", "where it went TO"),
+        Field("technique", "Technique",
+              "WMI / PsExec / RDP / SMB / WinRM / scheduled task …"),
+        Field("account", "Account Used", "account that authenticated"),
+    ),
+    csv_name="LateralMovement",
+    csv_headers=("Date / Time", "Source Host", "Destination Host",
+                 "Technique", "Account", "Description"),
+    csv_row=lambda f: [f.get("event_time", ""),
+                       _attrs(f).get("source_host", ""),
+                       _attrs(f).get("dest_host", ""),
+                       _attrs(f).get("technique", ""),
+                       _attrs(f).get("account", ""),
+                       f.get("detail", "") or f.get("title", "")],
+))
+
 _register(FindingType(
     key="hostindicator",
     label="Host-Based Indicator",
@@ -190,12 +217,15 @@ _register(FindingType(
 
 
 TIMELINE_CSV_NAME = "Timeline"
-TIMELINE_CSV_HEADERS = ("Date / Time", "Host Name", "Activity")
+# trailing column added past the FOR508 set: what the timestamp MEANS
+# (executed/created/modified/…) — leading columns stay spreadsheet-compatible
+TIMELINE_CSV_HEADERS = ("Date / Time", "Host Name", "Activity", "Time Meaning")
 
 
 def timeline_csv_row(f: dict) -> list:
     activity = _attrs(f).get("activity") or f.get("title", "")
-    return [f.get("event_time", ""), f.get("host", ""), activity]
+    return [f.get("event_time", ""), f.get("host", ""), activity,
+            f.get("time_kind", "")]
 
 
 def basename(path: str) -> str:
@@ -222,3 +252,39 @@ def all_attr_fields() -> dict[str, Field]:
 
 # Hash algorithms carried on findings, in display order: (attrs key, label).
 HASH_FIELDS = (("md5", "MD5"), ("sha1", "SHA-1"), ("sha256", "SHA-256"))
+
+
+# Common DFIR tools / actions, seeded into the Step modal's Tool autocomplete so
+# a fresh case doesn't start with an empty suggestion list. These are only
+# suggestions — any tool a case actually uses is merged in on top, and the field
+# stays free-text so analysts can always type something not listed here.
+DEFAULT_TOOLS: tuple[str, ...] = (
+    # Eric Zimmerman suite
+    "Registry Explorer", "Timeline Explorer", "MFTECmd", "PECmd", "LECmd",
+    "JLECmd", "AmcacheParser", "AppCompatCacheParser", "RECmd", "RBCmd",
+    "SBECmd", "SrumECmd", "WxTCmd", "EvtxECmd", "RecentFileCacheParser",
+    "bstrings", "Hasher",
+    # Memory forensics
+    "Volatility", "Volatility 3", "MemProcFS", "Rekall",
+    # Triage / collection / IR platforms
+    "KAPE", "Velociraptor", "GRR", "CyLR", "FTK Imager", "Arsenal Image Mounter",
+    # Full-suite forensics
+    "Autopsy", "X-Ways Forensics", "Magnet AXIOM", "EnCase",
+    # Timelining
+    "log2timeline / Plaso", "Timesketch",
+    # Event-log analytics
+    "Hayabusa", "Chainsaw", "Zircolite", "DeepBlueCLI", "EvtxECmd",
+    "Event Log Explorer", "RegRipper",
+    # Network
+    "Wireshark", "NetworkMiner", "Zeek", "Suricata", "tshark",
+    # Malware / RE
+    "YARA", "capa", "PEStudio", "Detect It Easy", "Ghidra", "IDA Pro",
+    "x64dbg", "oletools (olevba)", "pdf-parser", "CyberChef",
+    # Sysinternals
+    "Autoruns", "Process Monitor", "Process Explorer", "TCPView", "Sysmon",
+    "Strings",
+    # Browser / artifact parsers
+    "Hindsight", "BrowsingHistoryView", "ExifTool", "SQLite Browser",
+    # Live-response / shells
+    "PowerShell", "cmd.exe", "bash",
+)

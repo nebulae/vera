@@ -1026,6 +1026,13 @@ table.art-members { margin-top: 4px; }
   border-radius: 7px; background: var(--bg); color: var(--ink); }
 .member-add select { padding: 6px 9px; border: 1px solid var(--line);
   border-radius: 7px; background: var(--bg); color: var(--ink); }
+.user-disabled { opacity: 0.55; }
+.user-actions { display: flex; gap: 6px; white-space: nowrap; }
+.reset-code {
+  font-size: 20px; letter-spacing: 0.04em; text-align: center;
+  padding: 14px; margin: 10px 0; user-select: all; word-break: break-all;
+  background: var(--code-bg); border: 1px dashed var(--line); border-radius: 8px;
+}
 .user-chip { display: inline-flex; align-items: center; gap: 7px; }
 .user-chip b { color: var(--ink); font-size: 13px; }
 .reset-form { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }

@@ -79,6 +79,11 @@ async function boot() {
   state.user = auth.user;
   ensureUserChip();
   if (auth.user.must_change_password) return renderForcedChange();
+  ensureAdminButton();
+  // /admin is a standalone (case-independent) view, admins only
+  if (location.pathname.startsWith("/admin") && state.user.role === "admin") {
+    return renderAdmin();
+  }
   state.info = await api("/api/case");
   // can this user modify THIS case? admin anywhere; investigator if a member.
   // viewers never. drives whether edit affordances render (server enforces it).
@@ -312,6 +317,192 @@ function ensureMembersButton() {
   hr.insertBefore(btn, document.getElementById("user-chip"));
 }
 
+function ensureAdminButton() {
+  const old = document.getElementById("admin-btn");
+  if (old) old.remove();
+  if (!state.user || state.user.role !== "admin") return;
+  const btn = el("button", { id: "admin-btn", class: "btn small",
+    title: "manage users", onclick: showAdmin }, "Admin");
+  const hr = document.querySelector(".header-right");
+  hr.insertBefore(btn, document.getElementById("user-chip"));
+}
+
+function showAdmin() {
+  history.pushState(null, "", "/admin/users");
+  renderAdmin();
+}
+
+const ROLE_BLURB = {
+  admin: "manages users + full case access",
+  investigator: "logs actions/findings on cases they're a member of",
+  viewer: "read-only across all cases",
+};
+
+async function renderAdmin() {
+  document.body.classList.remove("readonly");
+  document.getElementById("case-title").textContent = "Administration";
+  document.getElementById("case-counts").textContent = "";
+  document.getElementById("tabs").replaceChildren();
+  const exportLink = document.getElementById("export-md");
+  if (exportLink) exportLink.style.display = "none";
+  const view = document.getElementById("view");
+  view.replaceChildren(el("div", { class: "hint" }, "loading…"));
+
+  const users = await api("/api/users");
+  const err = el("div", { class: "form-error" });
+
+  const roleSelect = (u) => {
+    const sel = el("select", { class: "cell cell-select" },
+      ["admin", "investigator", "viewer"].map((r) =>
+        el("option", { value: r, selected: u.role === r ? "" : null }, r)));
+    // guard: don't let the last enabled admin demote themselves into lockout
+    sel.addEventListener("change", async () => {
+      err.textContent = "";
+      try {
+        await api(`/api/users/${u.id}`, { method: "PATCH",
+          body: { role: sel.value } });
+        u.role = sel.value;
+        flashSaved(sel);
+      } catch (e) { err.textContent = String(e.message || e); sel.value = u.role; }
+    });
+    return sel;
+  };
+
+  const row = (u) => {
+    const me = u.id === state.user.id;
+    const tr = el("tr", { class: u.disabled ? "user-disabled" : "" });
+    tr.append(
+      el("td", { class: "mono" }, String(u.id)),
+      el("td", {}, el("b", {}, u.username), me
+        ? el("span", { class: "meta" }, " (you)") : null),
+      el("td", {}, u.display_name || el("span", { class: "meta" }, "—")),
+      el("td", {}, roleSelect(u)),
+      el("td", {}, u.disabled
+        ? el("span", { class: "st-pill st-suspicious" }, "disabled")
+        : el("span", { class: "st-pill st-clean" }, "active"),
+        u.must_change_password
+          ? el("span", { class: "meta", title: "must set their own password "
+              + "at next sign-in" }, " · pending") : null),
+      el("td", { class: "mono meta" }, u.created_at));
+    // actions: reset code, enable/disable (never disable yourself)
+    const actions = el("td", { class: "user-actions" });
+    const resetBtn = el("button", { class: "btn small ghost",
+      title: "generate a one-time code to hand this user so they can set a new "
+        + "password", onclick: async () => {
+        err.textContent = "";
+        try {
+          const r = await api(`/api/users/${u.id}/reset_token`,
+            { method: "POST", body: {} });
+          showResetCode(u.username, r.reset_token);
+        } catch (e) { err.textContent = String(e.message || e); }
+      } }, "Reset code");
+    actions.append(resetBtn);
+    if (!me) {
+      actions.append(el("button", { class: "btn small ghost",
+        onclick: async () => {
+          err.textContent = "";
+          try {
+            await api(`/api/users/${u.id}`, { method: "PATCH",
+              body: { disabled: !u.disabled } });
+            u.disabled = !u.disabled;
+            renderRows();
+          } catch (e) { err.textContent = String(e.message || e); }
+        } }, u.disabled ? "Enable" : "Disable"));
+    }
+    tr.append(actions);
+    return tr;
+  };
+
+  const tbody = el("tbody", {});
+  const renderRows = () => tbody.replaceChildren(...users.map(row));
+  renderRows();
+
+  const table = el("table", { class: "host-grid" },
+    el("thead", {}, el("tr", {}, ["ID", "Username", "Display name", "Role",
+      "Status", "Created", ""].map((h) => el("th", {}, h)))),
+    tbody);
+
+  const addBtn = el("button", { class: "btn primary" }, "+ Add user");
+  addBtn.addEventListener("click", () => openAddUserModal(async () => {
+    const fresh = await api("/api/users");
+    users.length = 0; users.push(...fresh);
+    renderRows();
+  }));
+
+  const backBtn = el("button", { class: "btn small" }, "← Back to case");
+  backBtn.addEventListener("click", async () => {
+    history.pushState(null, "", "/investigation");
+    await boot();
+  });
+
+  view.replaceChildren(
+    el("div", { class: "toolbar" }, backBtn, addBtn,
+      el("span", { class: "hint" },
+        "Admins manage accounts here. Roles: "
+        + "admin — manages users + full case access · "
+        + "investigator — works cases they're a member of · "
+        + "viewer — read-only everywhere.")),
+    el("div", { class: "table-wrap" }, table),
+    err);
+}
+
+function showResetCode(username, code) {
+  openFormModal(`Reset code for ${username}`, (close) => el("div", {},
+    el("p", { class: "hint" },
+      "Hand this one-time code to the user. It expires in 1 hour and works "
+      + "once — they enter it on the sign-in screen under “have a reset "
+      + "code?” to set their own password."),
+    el("div", { class: "reset-code mono" }, code),
+    el("div", { class: "form-actions" },
+      el("button", { class: "btn", onclick: () =>
+        navigator.clipboard && navigator.clipboard.writeText(code) }, "Copy"),
+      el("button", { class: "btn primary", onclick: close }, "Done"))));
+}
+
+function openAddUserModal(done) {
+  openFormModal("Add user", (close) => {
+    const uname = el("input", { name: "username", placeholder: "e.g. neo",
+      autocomplete: "off" });
+    const disp = el("input", { name: "display_name",
+      placeholder: "shown on reports (optional)", autocomplete: "off" });
+    const role = el("select", { name: "role" },
+      el("option", { value: "investigator" }, "investigator"),
+      el("option", { value: "viewer" }, "viewer"),
+      el("option", { value: "admin" }, "admin"));
+    // two ways to hand over an account: set a temp password (they rotate it at
+    // first sign-in) or issue a one-time reset code
+    const mode = el("select", { name: "mode" },
+      el("option", { value: "code" }, "issue a one-time reset code"),
+      el("option", { value: "password" }, "set a temporary password"));
+    const pw = pwInput("password", "temp password (they'll change it)");
+    const pwField = field("Temporary password", pw, true);
+    pwField.style.display = "none";
+    mode.addEventListener("change", () => {
+      pwField.style.display = mode.value === "password" ? "" : "none";
+    });
+    return formCard({
+      fields: [
+        field("Username", uname, true),
+        field("Display name", disp, true),
+        field("Role", role),
+        field("Onboarding", mode),
+        pwField,
+      ],
+      submitLabel: "Create user",
+      oncancel: close,
+      onsubmit: async () => {
+        const body = { username: uname.value.trim(),
+          display_name: disp.value.trim(), role: role.value };
+        if (mode.value === "password") body.password = pw.value;
+        const res = await api("/api/users", { method: "POST", body });
+        close();
+        await done();
+        if (res.reset_token) showResetCode(body.username, res.reset_token);
+      },
+    });
+  });
+}
+
 function openMembersModal() {
   const canManage = state.user && (state.user.role === "admin"
     || state.info.my_case_role === "lead");
@@ -527,6 +718,14 @@ function selectTab(id) {
 }
 
 window.addEventListener("popstate", () => {
+  // admin is a standalone view, and returning from it may need the case
+  // (re)loaded — boot() re-reads the URL and does the right thing. Only the
+  // cheap in-place path (already inside a loaded case) skips the reload.
+  if (location.pathname.startsWith("/admin")
+      || !state.info || !state.info.active) {
+    boot();
+    return;
+  }
   if (urlToState()) render();
 });
 

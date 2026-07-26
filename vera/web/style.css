@@ -1003,6 +1003,29 @@ table.art-members { margin-top: 4px; }
 
 /* worklist as a compact, aligned table */
 .lead-scroll { margin-top: 10px; overflow-x: auto; }
+/* viewer / non-member read-only mode — cosmetic (server enforces writes);
+   hide the create/edit affordances, make inline-edit cells non-interactive */
+.readonly .node-tools,
+.readonly .lead-add-tr,
+.readonly .host-new,
+.readonly .member-add,
+.readonly .dropzone,
+.readonly .lead-investigate .btn,
+.readonly .lead-link-input,
+.readonly .btn.primary { display: none; }
+.readonly .cell,
+.readonly .cell-select,
+.readonly .lead-status { pointer-events: none; opacity: 0.85; }
+
+.member-list { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.member-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+.member-row .ref.l { font-size: 10px; }
+.member-add { display: flex; gap: 8px; align-items: center; margin-top: 10px;
+  border-top: 1px dashed var(--line); padding-top: 10px; }
+.member-add input { flex: 1; padding: 6px 9px; border: 1px solid var(--line);
+  border-radius: 7px; background: var(--bg); color: var(--ink); }
+.member-add select { padding: 6px 9px; border: 1px solid var(--line);
+  border-radius: 7px; background: var(--bg); color: var(--ink); }
 .user-chip { display: inline-flex; align-items: center; gap: 7px; }
 .user-chip b { color: var(--ink); font-size: 13px; }
 .reset-form { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }

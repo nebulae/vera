@@ -11,7 +11,7 @@ import sqlite3
 
 from . import types
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 OUTPUT_CAP = 256 * 1024        # chars of captured command output stored per action
 ATTACHMENT_CAP = 25 * 1024 * 1024  # max bytes per stored attachment
 
@@ -94,6 +94,7 @@ CREATE TABLE evidence (
 CREATE TABLE actions (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     performed_at      TEXT NOT NULL,
+    created_by        TEXT NOT NULL DEFAULT '',
     host              TEXT NOT NULL DEFAULT '',
     evidence_id       INTEGER REFERENCES evidence(id),
     collection_id     INTEGER REFERENCES collections(id),
@@ -112,6 +113,7 @@ CREATE TABLE findings (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     action_id   INTEGER REFERENCES actions(id),
     evidence_id INTEGER REFERENCES evidence(id),
+    created_by  TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     event_time TEXT NOT NULL DEFAULT '',
     time_kind  TEXT NOT NULL DEFAULT '',
@@ -176,10 +178,17 @@ CREATE TABLE lead_items (
 CREATE TABLE audit_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     at         TEXT NOT NULL,
+    who        TEXT NOT NULL DEFAULT '',      -- acting username ('' = unknown/CLI)
     table_name TEXT NOT NULL,
     row_id     INTEGER NOT NULL,
     op         TEXT NOT NULL,                 -- update | soft_delete
     changes    TEXT NOT NULL DEFAULT '{}'     -- {field: {"from": .., "to": ..}}
+);
+CREATE TABLE case_members (
+    username  TEXT PRIMARY KEY,              -- references the global users DB by name
+    role      TEXT NOT NULL DEFAULT 'investigator',  -- lead | investigator
+    added_by  TEXT NOT NULL DEFAULT '',
+    added_at  TEXT NOT NULL
 );
 CREATE INDEX idx_audit_row ON audit_log(table_name, row_id);
 CREATE INDEX idx_leaditems_lead  ON lead_items(lead_id);
@@ -555,12 +564,38 @@ def _migrate_v16(conn: sqlite3.Connection) -> None:
                      " account_id) VALUES (?, ?)", (f[0], aid))
 
 
+def _migrate_v17(conn: sqlite3.Connection) -> None:
+    """v16 -> v17: collaboration — who did what (created_by on actions/findings,
+    who on the audit log) and per-case membership with a lead investigator.
+    Legacy rows keep created_by='' (unknown); the members table starts empty
+    (an admin claims the lead, or the creator becomes lead on new cases)."""
+    acols = {r[1] for r in conn.execute("PRAGMA table_info(actions)")}
+    if "created_by" not in acols:
+        conn.execute("ALTER TABLE actions ADD COLUMN "
+                     "created_by TEXT NOT NULL DEFAULT ''")
+    fcols = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
+    if "created_by" not in fcols:
+        conn.execute("ALTER TABLE findings ADD COLUMN "
+                     "created_by TEXT NOT NULL DEFAULT ''")
+    ncols = {r[1] for r in conn.execute("PRAGMA table_info(audit_log)")}
+    if "who" not in ncols:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN "
+                     "who TEXT NOT NULL DEFAULT ''")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS case_members (
+            username  TEXT PRIMARY KEY,
+            role      TEXT NOT NULL DEFAULT 'investigator',
+            added_by  TEXT NOT NULL DEFAULT '',
+            added_at  TEXT NOT NULL
+        )""")
+
+
 # Applied in ascending order to bring a case up to SCHEMA_VERSION.
 MIGRATIONS = {2: _migrate_v2, 3: _migrate_v3, 4: _migrate_v4, 5: _migrate_v5,
               6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8, 9: _migrate_v9,
               10: _migrate_v10, 11: _migrate_v11, 12: _migrate_v12,
               13: _migrate_v13, 14: _migrate_v14, 15: _migrate_v15,
-              16: _migrate_v16}
+              16: _migrate_v16, 17: _migrate_v17}
 
 
 class CaseError(Exception):
@@ -612,8 +647,11 @@ def normalize_hashes(hashes: dict | None) -> dict:
 class Case:
     """A single investigation file. Thin wrapper over sqlite3."""
 
-    def __init__(self, path: str, create: bool = False):
+    def __init__(self, path: str, create: bool = False, actor: str = ""):
         self.path = os.path.abspath(path)
+        # who is acting through this connection — stamped onto created_by and
+        # the audit log. '' = unknown (a direct CLI edit).
+        self.actor = actor
         exists = os.path.exists(self.path)
         if not exists and not create:
             raise CaseError(f"case file not found: {path}")
@@ -697,6 +735,70 @@ class Case:
     def meta(self) -> dict:
         return {r["key"]: r["value"]
                 for r in self.conn.execute("SELECT key, value FROM case_meta")}
+
+    # -- membership ---------------------------------------------------------
+    # Members are stored by username (the users DB is global and the .vera file
+    # must stay portable — no cross-db foreign keys). Exactly one 'lead' per
+    # case; the lead (or an admin) manages the roster.
+
+    def members(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT username, role, added_by, added_at FROM case_members "
+            "ORDER BY role = 'lead' DESC, username COLLATE NOCASE")]
+
+    def member_role(self, username: str) -> str | None:
+        """'lead' / 'investigator' / None for this user on this case."""
+        if not username:
+            return None
+        row = self.conn.execute(
+            "SELECT role FROM case_members WHERE username = ? COLLATE NOCASE",
+            (username,)).fetchone()
+        return row["role"] if row else None
+
+    def lead(self) -> str | None:
+        row = self.conn.execute(
+            "SELECT username FROM case_members WHERE role = 'lead'").fetchone()
+        return row["username"] if row else None
+
+    def add_member(self, username: str, role: str = "investigator",
+                   added_by: str = "") -> None:
+        username = username.strip()
+        if not username:
+            raise CaseError("member username must not be empty")
+        if role not in ("lead", "investigator"):
+            raise CaseError("case role must be 'lead' or 'investigator'")
+        existing_lead = self.lead()
+        if role == "lead" and existing_lead and existing_lead.lower() != username.lower():
+            raise CaseError(f"this case already has a lead ({existing_lead}) — "
+                            "reassign the lead instead of adding a second")
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO case_members(username, role, added_by, added_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(username) DO UPDATE SET "
+                "role = excluded.role", (username, role, added_by, _now()))
+
+    def remove_member(self, username: str) -> None:
+        if self.member_role(username) == "lead":
+            raise CaseError("can't remove the lead investigator — reassign the "
+                            "lead to someone else first")
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM case_members WHERE username = ? COLLATE NOCASE",
+                (username,))
+
+    def set_lead(self, username: str, added_by: str = "") -> None:
+        """Make `username` the sole lead; a prior lead drops to investigator."""
+        username = username.strip()
+        if not username:
+            raise CaseError("lead username must not be empty")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE case_members SET role = 'investigator' "
+                "WHERE role = 'lead'")
+            self.conn.execute(
+                "INSERT INTO case_members(username, role, added_by, added_at) "
+                "VALUES (?, 'lead', ?, ?) ON CONFLICT(username) DO UPDATE SET "
+                "role = 'lead'", (username, added_by, _now()))
 
     # -- evidence -----------------------------------------------------------
 
@@ -796,14 +898,15 @@ class Case:
         default_tool = command.split()[0] if (method == "command" and command) else ""
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO actions(performed_at, host, evidence_id, collection_id,"
-                " tool, method, command, procedure, output, output_sha256,"
-                " output_truncated, exit_code, notes, parent_finding_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (performed_at or _now(), host, evidence_id, collection_id,
-                 tool or default_tool, method, command, procedure,
-                 output[:OUTPUT_CAP], digest, int(truncated), exit_code, notes,
-                 parent_finding_id))
+                "INSERT INTO actions(performed_at, created_by, host, evidence_id,"
+                " collection_id, tool, method, command, procedure, output,"
+                " output_sha256, output_truncated, exit_code, notes,"
+                " parent_finding_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (performed_at or _now(), self.actor, host, evidence_id,
+                 collection_id, tool or default_tool, method, command,
+                 procedure, output[:OUTPUT_CAP], digest, int(truncated),
+                 exit_code, notes, parent_finding_id))
             aid = cur.lastrowid
         if host_ids:
             self.set_action_hosts(aid, host_ids, audit=False)
@@ -864,12 +967,12 @@ class Case:
         attrs = self._normalize_finding_attrs(ftype, attrs)
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO findings(action_id, evidence_id, created_at,"
-                " event_time, time_kind, title, detail, ftype, host, attrs,"
-                " hashes, starred)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (action_id, evidence_id, _now(), event_time, time_kind, title,
-                 detail, ftype, host, json.dumps(attrs),
+                "INSERT INTO findings(action_id, evidence_id, created_by,"
+                " created_at, event_time, time_kind, title, detail, ftype,"
+                " host, attrs, hashes, starred)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (action_id, evidence_id, self.actor, _now(), event_time,
+                 time_kind, title, detail, ftype, host, json.dumps(attrs),
                  json.dumps(clean_hashes), int(starred)))
             fid = cur.lastrowid
         if host_ids:
@@ -1012,9 +1115,10 @@ class Case:
         if op == "update" and not changes:
             return
         self.conn.execute(
-            "INSERT INTO audit_log(at, table_name, row_id, op, changes)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (_now(), table, row_id, op, json.dumps(changes, default=str)))
+            "INSERT INTO audit_log(at, who, table_name, row_id, op, changes)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (_now(), self.actor, table, row_id, op,
+             json.dumps(changes, default=str)))
 
     def _update(self, table: str, allowed: set, row_id: int,
                 fields: dict, prefix: str) -> None:
@@ -2003,7 +2107,7 @@ class Case:
         """Read the append-only edit history, newest first. `ref` filters to
         one row (A4 / F2 / E1 / H3 / C1). There is deliberately NO write API
         beyond _audit and nothing that updates or deletes log rows."""
-        q = ("SELECT id, at, table_name, row_id, op, changes FROM audit_log")
+        q = ("SELECT id, at, who, table_name, row_id, op, changes FROM audit_log")
         params: tuple = ()
         if ref:
             kind = ref[:1].upper()

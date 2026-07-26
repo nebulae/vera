@@ -83,10 +83,10 @@ class Handler(BaseHTTPRequestHandler):
             raise CaseError("expected a JSON object")
         return data
 
-    def _case(self) -> Case:
+    def _case(self, actor: str = "") -> Case:
         if not self.case_path:
             raise CaseError("no active investigation — create or open one first")
-        return Case(self.case_path)
+        return Case(self.case_path, actor=actor)
 
     # -- auth plumbing --------------------------------------------------------
 
@@ -96,6 +96,11 @@ class Handler(BaseHTTPRequestHandler):
             if key == "vera_session":
                 return val
         return ""
+
+    def _current_user(self) -> dict | None:
+        """The session's user, or None — without sending any error response."""
+        with UsersDB(Handler.users_path) as udb:
+            return udb.session_user(self._cookie_token())
 
     def _require_user(self, *roles: str) -> dict | None:
         """The session's user, or None after sending 401/403."""
@@ -131,6 +136,7 @@ class Handler(BaseHTTPRequestHandler):
                 with Case(p) as c:
                     out.append({"file": os.path.basename(p),
                                 "name": c.meta().get("name", ""),
+                                "lead": c.lead(),
                                 "counts": c.counts()})
             except CaseError:
                 continue
@@ -219,7 +225,20 @@ class Handler(BaseHTTPRequestHandler):
             if user["role"] not in ("admin", "investigator"):
                 self._error("viewers have read-only access", 403)
                 return
-            self._api_mutate(method, url, body)
+            # membership endpoints manage the case roster (lead/admin only)
+            if url.path == "/api/members" or url.path.startswith("/api/members/"):
+                self._members_mutate(method, url, body, user)
+                return
+            # investigators may only modify cases they belong to; admins may
+            # modify any case (implicit member everywhere). Case creation is
+            # exempt — there's no case to be a member of yet.
+            if user["role"] == "investigator" and url.path != "/api/cases":
+                with self._case() as case:
+                    if case.member_role(user["username"]) is None:
+                        self._error("you are not a member of this case — ask "
+                                    "its lead investigator to add you", 403)
+                        return
+            self._api_mutate(method, url, body, user)
         except AuthError as exc:
             self._error(str(exc), 403)
         except CaseError as exc:
@@ -322,13 +341,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         with self._case() as case:
             if url.path == "/api/case":
+                me = self._current_user()
                 self._json({"active": True, "meta": case.meta(),
                             "evidence": case.evidence(), "counts": case.counts(),
                             "hosts": case.hosts(), "collections": case.collections(),
                             "accounts": case.accounts(),
+                            "members": case.members(),
+                            "my_case_role": (case.member_role(me["username"])
+                                             if me else None),
                             "file": os.path.basename(case.path),
                             "tools": case.tool_suggestions(),
                             "types": _types_payload()})
+            elif url.path == "/api/members":
+                self._json(case.members())
             elif url.path == "/api/tree":
                 self._json({"roots": case.tree(),
                             "unattached": case.unattached_findings()})
@@ -375,14 +400,15 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- POST / PATCH endpoints ---------------------------------------------------
 
-    def _api_mutate(self, method: str, url, body: dict):
+    def _api_mutate(self, method: str, url, body: dict, user: dict | None = None):
+        actor = user["username"] if user else ""
         if method == "POST" and url.path == "/api/cases":
-            self._create_case(body)
+            self._create_case(body, actor)
             return
         if method == "POST" and url.path == "/api/open":
             self._open_case(body)
             return
-        with self._case() as case:
+        with self._case(actor) as case:
             if method == "POST" and url.path == "/api/actions":
                 aid = case.add_action(
                     body.get("command", ""),
@@ -637,7 +663,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- case lifecycle -----------------------------------------------------------
 
-    def _create_case(self, body: dict):
+    def _create_case(self, body: dict, actor: str = ""):
         name = (body.get("name") or "").strip()
         if not name:
             raise CaseError("an investigation name is required")
@@ -648,11 +674,46 @@ class Handler(BaseHTTPRequestHandler):
         while os.path.exists(path):
             path = os.path.join(Handler.case_dir, f"{base}-{n}.vera")
             n += 1
-        with Case(path, create=True) as c:
+        with Case(path, create=True, actor=actor) as c:
             c.set_meta(name=name, investigator=body.get("investigator", ""))
+            # the creator becomes the case's lead investigator
+            if actor:
+                c.add_member(actor, role="lead", added_by=actor)
         Handler.case_path = path
         _set_active_case(path)
         self._json({"file": os.path.basename(path), "name": name}, 201)
+
+    def _members_mutate(self, method: str, url, body: dict, user: dict) -> None:
+        """Manage the case roster. Only the lead investigator or an admin may
+        change membership; the lead is set/reassigned here too."""
+        actor = user["username"]
+        with self._case(actor) as case:
+            can_manage = (user["role"] == "admin"
+                          or case.member_role(actor) == "lead")
+            if not can_manage:
+                self._error("only the case's lead investigator or an admin "
+                            "can manage members", 403)
+                return
+            if method == "POST" and url.path == "/api/members":
+                username = (body.get("username") or "").strip()
+                role = body.get("role", "investigator")
+                # guard against inviting someone who isn't a real user
+                with UsersDB(Handler.users_path) as udb:
+                    if udb._find(username) is None:
+                        raise CaseError(f"no such user {username!r}")
+                if role == "lead":
+                    case.set_lead(username, added_by=actor)
+                else:
+                    case.add_member(username, role="investigator",
+                                    added_by=actor)
+                self._json({"ok": True, "members": case.members()}, 201)
+                return
+            m = re.fullmatch(r"/api/members/([^/]+)", url.path)
+            if m and method == "DELETE":
+                case.remove_member(m.group(1))
+                self._json({"ok": True, "members": case.members()})
+                return
+            self._error("not found", 404)
 
     def _open_case(self, body: dict):
         fname = os.path.basename(body.get("file", ""))

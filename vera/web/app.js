@@ -10,6 +10,7 @@ const state = {
   collapsedInit: false,  // tree starts fully collapsed once per case open
   timeRange: { from: "", to: "" },  // timeline filter, mirrored in the URL
   user: null,       // signed-in user from /api/auth
+  canEdit: false,   // may this user modify the current case?
 };
 
 // host disposition — '' means not yet triaged
@@ -79,6 +80,10 @@ async function boot() {
   ensureUserChip();
   if (auth.user.must_change_password) return renderForcedChange();
   state.info = await api("/api/case");
+  // can this user modify THIS case? admin anywhere; investigator if a member.
+  // viewers never. drives whether edit affordances render (server enforces it).
+  state.canEdit = state.user && (state.user.role === "admin"
+    || (state.user.role === "investigator" && state.info.my_case_role));
   state.collapsedInit = false;  // a (re)opened case starts collapsed again
   const exportLink = document.getElementById("export-md");
   if (!state.info.active) {
@@ -96,6 +101,15 @@ async function boot() {
   await render();
 }
 
+// "by <user>" attribution chip for an action/finding (created_by). Empty for
+// pre-collaboration records (created_by == ''); links to the display name if
+// the user is still known.
+function byline(createdBy) {
+  if (!createdBy) return null;
+  return el("span", { class: "meta byline", title: `logged by ${createdBy}` },
+    `👤 ${createdBy}`);
+}
+
 function ensureSwitchButton() {
   if (document.getElementById("switch-case")) return;
   const btn = el("button", {
@@ -110,6 +124,7 @@ function ensureSwitchButton() {
 /* ---------- auth screens ---------- */
 
 function authShell(...cards) {
+  document.body.classList.remove("readonly");
   document.getElementById("case-title").textContent = "";
   document.getElementById("case-counts").textContent = "";
   document.getElementById("tabs").replaceChildren();
@@ -282,15 +297,105 @@ function ensureUserChip() {
       location.reload();
     } }, "Sign out"));
   const hr = document.querySelector(".header-right");
+  ensureMembersButton();
   hr.insertBefore(chip, hr.firstChild);
+}
+
+function ensureMembersButton() {
+  const old = document.getElementById("members-btn");
+  if (old) old.remove();
+  // only meaningful with an active case; hidden on the landing screen
+  if (!state.info || !state.info.active) return;
+  const btn = el("button", { id: "members-btn", class: "btn small",
+    title: "who's on this case", onclick: openMembersModal }, "Members");
+  const hr = document.querySelector(".header-right");
+  hr.insertBefore(btn, document.getElementById("user-chip"));
+}
+
+function openMembersModal() {
+  const canManage = state.user && (state.user.role === "admin"
+    || state.info.my_case_role === "lead");
+  openFormModal("Case members", (close) => {
+    const body = el("div", {});
+    const err = el("div", { class: "form-error" });
+
+    const renderBody = () => {
+      const members = state.info.members || [];
+      const rows = members.length ? members.map((m) => {
+        const isLead = m.role === "lead";
+        const bits = [
+          el("span", { class: "ref " + (isLead ? "l" : "f") },
+            isLead ? "LEAD" : "INV"),
+          el("b", {}, m.username),
+          el("span", { class: "meta" }, ` · added by ${m.added_by || "—"}`),
+        ];
+        if (canManage && !isLead) {
+          bits.push(el("button", { class: "btn small ghost",
+            title: "make this person the lead investigator",
+            onclick: () => act({ username: m.username, role: "lead" }) },
+            "Make lead"));
+          bits.push(el("button", { class: "btn small ghost", onclick: () =>
+            act(null, m.username) }, "Remove"));
+        }
+        return el("div", { class: "member-row" }, ...bits);
+      }) : [el("p", { class: "hint" }, "no members yet")];
+      const add = [];
+      if (canManage) {
+        const uname = el("input", { placeholder: "username", autocomplete: "off" });
+        const role = el("select", {},
+          el("option", { value: "investigator" }, "investigator"),
+          el("option", { value: "lead" }, "lead (reassigns the lead)"));
+        uname.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") act({ username: uname.value.trim(),
+            role: role.value }); });
+        add.push(el("div", { class: "member-add" },
+          uname, role,
+          el("button", { class: "btn small primary", onclick: () =>
+            act({ username: uname.value.trim(), role: role.value }) }, "Add")));
+      }
+      body.replaceChildren(
+        el("p", { class: "hint" },
+          "The lead investigator (or an admin) adds collaborators. "
+          + "Investigators can only modify cases they're a member of."),
+        el("div", { class: "member-list" }, ...rows),
+        ...add, err);
+    };
+
+    const act = async (addBody, removeUser) => {
+      err.textContent = "";
+      try {
+        if (removeUser) {
+          await api(`/api/members/${encodeURIComponent(removeUser)}`,
+            { method: "DELETE" });
+        } else {
+          if (!addBody.username) { err.textContent = "enter a username"; return; }
+          await api("/api/members", { method: "POST", body: addBody });
+        }
+        await refreshInfo();
+        // reflect a possible change to MY own access immediately
+        state.canEdit = state.user && (state.user.role === "admin"
+          || (state.user.role === "investigator" && state.info.my_case_role));
+        renderBody();
+      } catch (e) { err.textContent = String(e.message || e); }
+    };
+
+    renderBody();
+    return el("div", {}, body,
+      el("div", { class: "form-actions" },
+        el("button", { class: "btn", onclick: close }, "Done")));
+  });
 }
 
 async function renderLanding() {
   const data = await api("/api/cases");
+  document.body.classList.remove("readonly");
   document.getElementById("case-title").textContent = "";
   document.getElementById("case-counts").textContent = "";
   document.getElementById("tabs").replaceChildren();
   const view = document.getElementById("view");
+  // creating a case needs investigator+ (viewers only reopen and read)
+  const canCreate = state.user
+    && ["admin", "investigator"].includes(state.user.role);
 
   const nameInput = el("input", {
     placeholder: "e.g. FOR508 Lab 3 — Stark Research Labs", autocomplete: "off",
@@ -307,17 +412,17 @@ async function renderLanding() {
   };
   nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") start(); });
 
-  const newCard = el("div", { class: "card" },
+  const newCard = canCreate ? el("div", { class: "card" },
     el("h2", { class: "landing-h" }, "Start a new investigation"),
     el("p", { class: "hint" },
       "Name it, then log each command you run and the findings it produces. " +
-      "Everything is saved to a portable case file you can hand to anyone."),
+      "You become its lead investigator and can add others."),
     el("label", { class: "field wide" }, "Investigation name", nameInput),
     el("div", { class: "form-actions" },
       el("button", { class: "btn primary", onclick: start }, "Start investigation")),
-    err);
+    err) : null;
 
-  const cards = [newCard];
+  const cards = newCard ? [newCard] : [];
   if (data.cases && data.cases.length) {
     cards.push(el("div", { class: "card" },
       el("h3", {}, "Or reopen an investigation"),
@@ -329,7 +434,9 @@ async function renderLanding() {
             await boot();
           },
         },
-          el("span", { class: "case-name" }, c.name || c.file),
+          el("span", { class: "case-name" }, c.name || c.file,
+            c.lead ? el("span", { class: "meta lead-tag",
+              title: "lead investigator" }, ` · lead ${c.lead}`) : null),
           el("span", { class: "meta" },
             `${c.counts.actions} actions · ${c.counts.findings} findings · ${c.counts.evidence} evidence`),
           el("span", { class: "mono meta" }, c.file))))));
@@ -502,6 +609,9 @@ async function render() {
   // keep the address bar in sync (in place — tab switches push real history
   // entries in selectTab; ref-link jumps just update the current one)
   history.replaceState(null, "", tabToUrl(state.tab, state.jumpTo));
+  // viewers (and non-member investigators) get a read-only case: the CSS hides
+  // mutation affordances. The server rejects any write regardless.
+  document.body.classList.toggle("readonly", !state.canEdit);
   buildTabs();
   updateCounts();
   const view = document.getElementById("view");
@@ -1924,6 +2034,7 @@ function actionCard(a) {
       `🔎 ${nFind}`) : null,
     a.exit_code !== null && a.exit_code !== undefined && a.exit_code !== 0
       ? el("span", { class: "meta", style: "color: var(--danger)" }, `exit ${a.exit_code}`) : null,
+    byline(a.created_by),
     el("span", { class: "meta node-time" }, a.performed_at));
   card.append(head);
   if (collapsed) {
@@ -2044,6 +2155,7 @@ function findingCard(f) {
       `↳ ${nAct}`) : null,
     leadProgress,
     fuChip,
+    byline(f.created_by),
     f.event_time ? el("span", { class: "meta node-time" }, timeWithKind(f)) : null));
   if (collapsed) return card;
 

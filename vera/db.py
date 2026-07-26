@@ -11,7 +11,7 @@ import sqlite3
 
 from . import types
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 OUTPUT_CAP = 256 * 1024        # chars of captured command output stored per action
 ATTACHMENT_CAP = 25 * 1024 * 1024  # max bytes per stored attachment
 
@@ -189,6 +189,16 @@ CREATE TABLE case_members (
     role      TEXT NOT NULL DEFAULT 'investigator',  -- lead | investigator
     added_by  TEXT NOT NULL DEFAULT '',
     added_at  TEXT NOT NULL
+);
+CREATE TABLE exports (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    at            TEXT NOT NULL,
+    who           TEXT NOT NULL DEFAULT '',   -- acting user ('' = CLI)
+    kind          TEXT NOT NULL,              -- bundle | md | csv | json
+    inner_sha256  TEXT NOT NULL DEFAULT '',   -- hash of the inner archive (bundles)
+    bundle_sha256 TEXT NOT NULL DEFAULT '',   -- hash of the outer bundle
+    include_evidence INTEGER NOT NULL DEFAULT 0,
+    manifest      TEXT NOT NULL DEFAULT '{}'  -- the full manifest, as recorded
 );
 CREATE INDEX idx_audit_row ON audit_log(table_name, row_id);
 CREATE INDEX idx_leaditems_lead  ON lead_items(lead_id);
@@ -590,12 +600,29 @@ def _migrate_v17(conn: sqlite3.Connection) -> None:
         )""")
 
 
+def _migrate_v18(conn: sqlite3.Connection) -> None:
+    """v17 -> v18: per-case export ledger — every export (bundle/md/csv/json)
+    appends a row so the case records who took a copy out, when, and (for
+    bundles) the resulting hashes. Append-only, same ethos as the audit log."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS exports (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            at            TEXT NOT NULL,
+            who           TEXT NOT NULL DEFAULT '',
+            kind          TEXT NOT NULL,
+            inner_sha256  TEXT NOT NULL DEFAULT '',
+            bundle_sha256 TEXT NOT NULL DEFAULT '',
+            include_evidence INTEGER NOT NULL DEFAULT 0,
+            manifest      TEXT NOT NULL DEFAULT '{}'
+        )""")
+
+
 # Applied in ascending order to bring a case up to SCHEMA_VERSION.
 MIGRATIONS = {2: _migrate_v2, 3: _migrate_v3, 4: _migrate_v4, 5: _migrate_v5,
               6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8, 9: _migrate_v9,
               10: _migrate_v10, 11: _migrate_v11, 12: _migrate_v12,
               13: _migrate_v13, 14: _migrate_v14, 15: _migrate_v15,
-              16: _migrate_v16, 17: _migrate_v17}
+              16: _migrate_v16, 17: _migrate_v17, 18: _migrate_v18}
 
 
 class CaseError(Exception):
@@ -735,6 +762,36 @@ class Case:
     def meta(self) -> dict:
         return {r["key"]: r["value"]
                 for r in self.conn.execute("SELECT key, value FROM case_meta")}
+
+    def checkpoint(self) -> None:
+        """Fold the WAL back into the main .vera file so a copy of it is
+        complete — used before bundling/exporting the file."""
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    # -- export ledger ------------------------------------------------------
+
+    def record_export(self, kind: str, inner_sha256: str = "",
+                      bundle_sha256: str = "", include_evidence: bool = False,
+                      manifest: dict | None = None) -> int:
+        """Append an export event (append-only, like the audit log)."""
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO exports(at, who, kind, inner_sha256, bundle_sha256,"
+                " include_evidence, manifest) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (_now(), self.actor, kind, inner_sha256, bundle_sha256,
+                 int(include_evidence), json.dumps(manifest or {})))
+            return cur.lastrowid
+
+    def exports(self) -> list[dict]:
+        out = []
+        for r in self.conn.execute("SELECT * FROM exports ORDER BY id DESC"):
+            d = dict(r)
+            try:
+                d["manifest"] = json.loads(d.get("manifest") or "{}")
+            except json.JSONDecodeError:
+                d["manifest"] = {}
+            out.append(d)
+        return out
 
     # -- membership ---------------------------------------------------------
     # Members are stored by username (the users DB is global and the .vera file

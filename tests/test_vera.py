@@ -1,8 +1,10 @@
 import http.client
+import io
 import json
 import os
 import sqlite3
 import threading
+import zipfile
 
 import pytest
 
@@ -94,6 +96,88 @@ def test_manual_step(case):
         case.add_action(method="manual", host="WS01")  # no tool
     with pytest.raises(CaseError):
         case.add_action(method="command")  # empty command
+
+
+def test_export_bundle_roundtrip(case, tmp_path):
+    from vera import bundle
+    build_sample(case)
+    case.actor = "trinity"
+    out = tmp_path / "out"
+    path, manifest = bundle.build_bundle(case, str(out))
+    assert os.path.exists(path) and path.endswith(".bundle.zip")
+    assert manifest["signed"] is False and manifest["exported_by"] == "trinity"
+
+    # outer contains inner.zip + manifest + receipt; inner has the case + reports
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        assert "MANIFEST.json" in names and "RECEIPT.txt" in names
+        inner = next(n for n in names if n.endswith(".inner.zip"))
+        with zipfile.ZipFile(io.BytesIO(zf.read(inner))) as inz:
+            payload = inz.namelist()
+    assert any(n.endswith(".vera") for n in payload)
+    assert any(n.endswith(".json") for n in payload)
+    assert any(n.endswith(".md") for n in payload)
+
+    res = bundle.verify_bundle(path)
+    assert res["ok"] is True and res["signed"] is False
+    assert all(chk["ok"] for chk in res["checks"])
+
+    # the export is recorded in the case's ledger
+    exports = case.exports()
+    assert len(exports) == 1 and exports[0]["kind"] == "bundle"
+    assert exports[0]["who"] == "trinity" and exports[0]["bundle_sha256"]
+
+
+def test_bundle_tamper_detected(case, tmp_path):
+    from vera import bundle
+    build_sample(case)
+    path, _ = bundle.build_bundle(case, str(tmp_path))
+    # rewrite the outer zip with a byte flipped inside the inner archive
+    with zipfile.ZipFile(path) as zf:
+        entries = {n: zf.read(n) for n in zf.namelist()}
+    inner_name = next(n for n in entries if n.endswith(".inner.zip"))
+    blob = bytearray(entries[inner_name])
+    blob[-8] ^= 0x01  # flip a bit
+    entries[inner_name] = bytes(blob)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for n, data in entries.items():
+            zf.writestr(n, data)
+    res = bundle.verify_bundle(path)
+    assert res["ok"] is False and res["problems"]
+
+
+def test_bundle_include_evidence(case, tmp_path):
+    import hashlib
+    # a real file whose hash we record as evidence, plus a decoy that won't match
+    evdir = tmp_path / "evidence_src"
+    evdir.mkdir()
+    real = evdir / "ws01.mem"
+    real.write_bytes(b"pretend memory image")
+    sha = hashlib.sha256(real.read_bytes()).hexdigest()
+    case.add_evidence("WS01 memory dump", kind="memory", sha256=sha)
+    case.add_evidence("missing image", kind="disk", sha256="cd" * 32)
+
+    from vera import bundle
+    path, manifest = bundle.build_bundle(case, str(tmp_path / "out"),
+                                         include_evidence_dir=str(evdir))
+    assert manifest["include_evidence"] is True
+    results = {s["label"]: s["result"] for s in manifest["evidence_status"]}
+    assert results["WS01 memory dump"] == "included"
+    assert results["missing image"] == "not-found-in-dir"
+    # the included evidence rides inside the inner archive under evidence/
+    with zipfile.ZipFile(path) as zf:
+        inner = next(n for n in zf.namelist() if n.endswith(".inner.zip"))
+        with zipfile.ZipFile(io.BytesIO(zf.read(inner))) as inz:
+            assert any(n.startswith("evidence/") for n in inz.namelist())
+    assert bundle.verify_bundle(path)["ok"] is True
+
+
+def test_plain_export_recorded(case, tmp_path):
+    build_sample(case)
+    case.actor = "neo"
+    case.record_export("md")
+    exports = case.exports()
+    assert exports[0]["kind"] == "md" and exports[0]["who"] == "neo"
 
 
 def test_account_registry_auto_link(case):

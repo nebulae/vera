@@ -229,6 +229,10 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/members" or url.path.startswith("/api/members/"):
                 self._members_mutate(method, url, body, user)
                 return
+            # a full-case bundle is a formal deliverable — lead or admin only
+            if url.path == "/api/export/bundle":
+                self._export_bundle(user)
+                return
             # investigators may only modify cases they belong to; admins may
             # modify any case (implicit member everywhere). Case creation is
             # exempt — there's no case to be a member of yet.
@@ -682,6 +686,31 @@ class Handler(BaseHTTPRequestHandler):
         Handler.case_path = path
         _set_active_case(path)
         self._json({"file": os.path.basename(path), "name": name}, 201)
+
+    def _export_bundle(self, user: dict) -> None:
+        """Build a chain-of-custody bundle and stream it. Lead or admin only."""
+        import tempfile
+        from . import bundle as bundlemod
+        actor = user["username"]
+        with self._case(actor) as case:
+            if not (user["role"] == "admin"
+                    or case.member_role(actor) == "lead"):
+                self._error("only the case's lead investigator or an admin "
+                            "can export a bundle", 403)
+                return
+            with tempfile.TemporaryDirectory() as out:
+                path, _manifest = bundlemod.build_bundle(case, out)
+                with open(path, "rb") as fh:
+                    data = fh.read()
+                fname = os.path.basename(path)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="{fname}"')
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _members_mutate(self, method: str, url, body: dict, user: dict) -> None:
         """Manage the case roster. Only the lead investigator or an admin may

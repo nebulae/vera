@@ -390,6 +390,8 @@ def _md_action(w, case: Case, a: dict, depth: int, linker) -> None:
         w(f"_Follow-up to finding F{a['parent_finding_id']}._")
         w("")
     w(f"- **When:** {a['performed_at']}")
+    if a.get("created_by"):
+        w(f"- **Logged by:** {a['created_by']}")
     if a["evidence_id"]:
         w(f"- **Evidence:** E{a['evidence_id']}")
     if a["exit_code"] is not None:
@@ -443,6 +445,8 @@ def _md_finding(w, f: dict, depth: int, linker) -> None:
     for k, v in f["attrs"].items():
         if v:
             parts.append(f"{k.replace('_', ' ')} `{v}`")
+    if f.get("created_by"):
+        parts.append(f"logged by {f['created_by']}")
     if parts:
         w("> " + " · ".join(parts))
     if f.get("stack", 0) > 0:

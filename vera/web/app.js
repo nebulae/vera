@@ -98,6 +98,7 @@ async function boot() {
   }
   if (exportLink) exportLink.style.display = "";
   ensureSwitchButton();
+  ensureBundleButton();
   document.getElementById("case-title").textContent =
     state.info.meta.name || state.info.file;
   document.title = `vera — ${state.info.meta.name || state.info.file}`;
@@ -304,6 +305,46 @@ function ensureUserChip() {
   const hr = document.querySelector(".header-right");
   ensureMembersButton();
   hr.insertBefore(chip, hr.firstChild);
+}
+
+function ensureBundleButton() {
+  const old = document.getElementById("bundle-btn");
+  if (old) old.remove();
+  if (!state.info || !state.info.active) return;
+  // a full-case bundle is a lead/admin deliverable
+  const canBundle = state.user && (state.user.role === "admin"
+    || state.info.my_case_role === "lead");
+  if (!canBundle) return;
+  const btn = el("button", { id: "bundle-btn", class: "btn small",
+    title: "download a chain-of-custody bundle (case + reports + hashes, "
+      + "verifiable with `vera verify`)", onclick: (e) => downloadBundle(e.target) },
+    "Bundle");
+  const hr = document.querySelector(".header-right");
+  hr.insertBefore(btn, document.getElementById("export-md"));
+}
+
+async function downloadBundle(btn) {
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = "Building…";
+  try {
+    const res = await fetch("/api/export/bundle",
+      { method: "POST", headers: { "X-Vera": "1" } });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.error || res.statusText);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = cd.match(/filename="([^"]+)"/);
+    const url = URL.createObjectURL(blob);
+    const a = el("a", { href: url, download: m ? m[1] : "case.bundle.zip" });
+    document.body.append(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert("bundle export failed: " + (e.message || e));
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
 }
 
 function ensureMembersButton() {

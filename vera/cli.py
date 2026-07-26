@@ -1062,10 +1062,42 @@ def cmd_edit(args) -> int:
 def cmd_export(args) -> int:
     from . import export
     with open_case(args) as case:
+        if args.format == "bundle":
+            from . import bundle
+            path, manifest = bundle.build_bundle(
+                case, args.out,
+                include_evidence_dir=getattr(args, "include_evidence", None))
+            print(f"wrote {path}")
+            print(f"  sha256 {bundle._sha256_file(path)}")
+            print(f"  inner  {manifest['inner_zip']['sha256']}")
+            print("  (unsigned — integrity only)")
+            return 0
+        # a plain export is still an event worth recording in the case ledger
         written = export.export(case, args.format, args.out)
+        case.record_export(args.format)
     for path in written:
         print(f"wrote {path}")
     return 0
+
+
+def cmd_verify(args) -> int:
+    from . import bundle
+    res = bundle.verify_bundle(args.bundle)
+    m = res["manifest"]
+    print(f"bundle: {os.path.basename(args.bundle)}")
+    print(f"  case: {m.get('case_name','')}  exported {m.get('exported_at','')}"
+          f" by {m.get('exported_by','')}")
+    for chk in res["checks"]:
+        mark = c("2", "✓") if chk["ok"] else c("1", "✗")
+        print(f"  {mark} {chk['name']}")
+    if res["ok"]:
+        print(c("2", "OK — every hash matches the manifest.")
+              + ("" if res["signed"] else "  (unsigned — integrity only)"))
+        return 0
+    for p in res["problems"]:
+        print(c("1", f"  ! {p}"))
+    print(c("1", "TAMPERED — the bundle does not match its manifest."))
+    return 1
 
 
 def cmd_serve(args) -> int:
@@ -1441,10 +1473,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_edit)
 
     p = sub.add_parser("export", help="export the case")
-    p.add_argument("format", choices=("md", "json", "csv"))
+    p.add_argument("format", choices=("md", "json", "csv", "bundle"))
     p.add_argument("--out", metavar="DIR", default=".",
                    help="output directory (default: current)")
+    p.add_argument("--include-evidence", metavar="DIR", dest="include_evidence",
+                   help="(bundle) also pack raw evidence files found in DIR "
+                        "whose recorded SHA-256 matches, verifying each")
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("verify",
+                       help="verify a case export bundle against its manifest")
+    p.add_argument("bundle", help="path to a <case>-<date>.bundle.zip")
+    p.set_defaults(func=cmd_verify)
 
     p = sub.add_parser("serve", help="open the web viewer")
     p.add_argument("--port", type=int, default=8845)

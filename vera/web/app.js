@@ -8,6 +8,8 @@ const state = {
   notice: null,     // one-shot message shown on the next render
   collapsed: new Set(),  // action ids collapsed in the investigation view
   collapsedInit: false,  // tree starts fully collapsed once per case open
+  timeRange: { from: "", to: "" },  // timeline filter, mirrored in the URL
+  user: null,       // signed-in user from /api/auth
 };
 
 // host disposition — '' means not yet triaged
@@ -40,12 +42,20 @@ function el(tag, attrs = {}, ...children) {
 }
 
 async function api(path, opts = {}) {
+  // X-Vera on every request: the server requires it on mutations as a CSRF
+  // backstop (cross-site forms can't set custom headers)
+  opts.headers = { "X-Vera": "1" };
   if (opts.body) {
-    opts.headers = { "Content-Type": "application/json" };
+    opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(opts.body);
   }
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && path !== "/api/auth") {
+    // session expired mid-use — re-boot into the login screen
+    location.reload();
+    throw new Error("signed out");
+  }
   if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
   return data;
 }
@@ -62,6 +72,12 @@ function basename(p) {
 /* ---------- layout ---------- */
 
 async function boot() {
+  const auth = await api("/api/auth");
+  if (auth.needs_bootstrap) return renderBootstrap();
+  if (!auth.authenticated) return renderLogin();
+  state.user = auth.user;
+  ensureUserChip();
+  if (auth.user.must_change_password) return renderForcedChange();
   state.info = await api("/api/case");
   state.collapsedInit = false;  // a (re)opened case starts collapsed again
   const exportLink = document.getElementById("export-md");
@@ -75,6 +91,7 @@ async function boot() {
   document.getElementById("case-title").textContent =
     state.info.meta.name || state.info.file;
   document.title = `vera — ${state.info.meta.name || state.info.file}`;
+  urlToState();  // land on the tab/anchor the URL names (refresh, deep link)
   buildTabs();
   await render();
 }
@@ -88,6 +105,184 @@ function ensureSwitchButton() {
   }, "Investigations");
   const hr = document.querySelector(".header-right");
   hr.insertBefore(btn, hr.firstChild);
+}
+
+/* ---------- auth screens ---------- */
+
+function authShell(...cards) {
+  document.getElementById("case-title").textContent = "";
+  document.getElementById("case-counts").textContent = "";
+  document.getElementById("tabs").replaceChildren();
+  const exportLink = document.getElementById("export-md");
+  if (exportLink) exportLink.style.display = "none";
+  document.getElementById("view").replaceChildren(
+    el("div", { class: "landing-wrap" }, ...cards));
+}
+
+function pwInput(name, placeholder = "") {
+  return el("input", { name, type: "password", placeholder,
+    autocomplete: "off" });
+}
+
+function renderLogin(notice = "") {
+  const err = el("div", { class: "form-error" });
+  const user = el("input", { name: "username", placeholder: "username",
+    autocomplete: "username" });
+  const pw = pwInput("password");
+  const signIn = async () => {
+    err.textContent = "";
+    try {
+      await api("/api/login", { method: "POST", body: {
+        username: user.value.trim(), password: pw.value } });
+      await boot();
+    } catch (e) { err.textContent = String(e.message || e); }
+  };
+  for (const inp of [user, pw]) {
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") signIn(); });
+  }
+
+  // reset-code path: an admin hands you a one-time code, you set a password
+  const resetErr = el("div", { class: "form-error" });
+  const code = el("input", { name: "code", placeholder: "reset code",
+    autocomplete: "off" });
+  const npw = pwInput("npw", "new password");
+  const npw2 = pwInput("npw2", "new password again");
+  const resetForm = el("div", { class: "reset-form", style: "display:none" },
+    el("label", { class: "field wide" }, "Reset code", code),
+    el("label", { class: "field wide" }, "New password", npw),
+    el("label", { class: "field wide" }, "Repeat it", npw2),
+    el("div", { class: "form-actions" },
+      el("button", { class: "btn primary", onclick: async () => {
+        resetErr.textContent = "";
+        if (npw.value !== npw2.value) {
+          resetErr.textContent = "passwords do not match"; return;
+        }
+        try {
+          await api("/api/password", { method: "POST", body: {
+            reset_token: code.value.trim(), new_password: npw.value } });
+          renderLogin("password set — sign in with it now");
+        } catch (e) { resetErr.textContent = String(e.message || e); }
+      } }, "Set password")),
+    resetErr);
+  const resetToggle = el("a", { href: "#", class: "ref-link", onclick: (e) => {
+    e.preventDefault();
+    resetForm.style.display = resetForm.style.display === "none" ? "" : "none";
+  } }, "have a reset code?");
+
+  authShell(el("div", { class: "card" },
+    el("h2", { class: "landing-h" }, "Sign in to vera"),
+    notice ? el("p", { class: "hint" }, notice) : null,
+    el("label", { class: "field wide" }, "Username", user),
+    el("label", { class: "field wide" }, "Password", pw),
+    el("div", { class: "form-actions" },
+      el("button", { class: "btn primary", onclick: signIn }, "Sign in"),
+      resetToggle),
+    err, resetForm));
+  user.focus();
+}
+
+function renderBootstrap() {
+  const err = el("div", { class: "form-error" });
+  const user = el("input", { name: "username", placeholder: "e.g. trinity",
+    autocomplete: "off" });
+  const disp = el("input", { name: "display_name",
+    placeholder: "shown on reports (optional)", autocomplete: "off" });
+  const pw = pwInput("password", "12+ chars with 3 character classes, or 16+");
+  const pw2 = pwInput("password2");
+  authShell(el("div", { class: "card" },
+    el("h2", { class: "landing-h" }, "First run — create the admin account"),
+    el("p", { class: "hint" },
+      "This account manages users. Everyone signs in from here on."),
+    el("label", { class: "field wide" }, "Username", user),
+    el("label", { class: "field wide" }, "Display name", disp),
+    el("label", { class: "field wide" }, "Password", pw),
+    el("label", { class: "field wide" }, "Repeat it", pw2),
+    el("div", { class: "form-actions" },
+      el("button", { class: "btn primary", onclick: async () => {
+        err.textContent = "";
+        if (pw.value !== pw2.value) {
+          err.textContent = "passwords do not match"; return;
+        }
+        try {
+          await api("/api/bootstrap", { method: "POST", body: {
+            username: user.value.trim(), password: pw.value,
+            display_name: disp.value.trim() } });
+          await boot();
+        } catch (e) { err.textContent = String(e.message || e); }
+      } }, "Create admin account")),
+    err));
+  user.focus();
+}
+
+function renderForcedChange() {
+  const err = el("div", { class: "form-error" });
+  const cur = pwInput("current", "current password");
+  const npw = pwInput("npw", "new password");
+  const npw2 = pwInput("npw2", "new password again");
+  authShell(el("div", { class: "card" },
+    el("h2", { class: "landing-h" }, "Set a new password"),
+    el("p", { class: "hint" },
+      "Your password was set by an admin — choose your own to continue."),
+    el("label", { class: "field wide" }, "Current password", cur),
+    el("label", { class: "field wide" }, "New password", npw),
+    el("label", { class: "field wide" }, "Repeat it", npw2),
+    el("div", { class: "form-actions" },
+      el("button", { class: "btn primary", onclick: async () => {
+        err.textContent = "";
+        if (npw.value !== npw2.value) {
+          err.textContent = "passwords do not match"; return;
+        }
+        try {
+          await api("/api/password", { method: "POST", body: {
+            current_password: cur.value, new_password: npw.value } });
+          renderLogin("password changed — sign in with it now");
+        } catch (e) { err.textContent = String(e.message || e); }
+      } }, "Change password")),
+    err));
+  cur.focus();
+}
+
+function ensureUserChip() {
+  const existing = document.getElementById("user-chip");
+  if (existing) existing.remove();
+  if (!state.user) return;
+  const u = state.user;
+  const changeBtn = el("button", { class: "btn small ghost",
+    title: "change your password",
+    onclick: () => openFormModal("Change password", (close) => {
+      const cur = pwInput("current");
+      const npw = pwInput("npw");
+      const npw2 = pwInput("npw2");
+      return formCard({
+        fields: [
+          field("Current password", cur, true),
+          field("New password", npw, true),
+          field("Repeat it", npw2, true),
+        ],
+        submitLabel: "Change password",
+        oncancel: close,
+        onsubmit: async () => {
+          if (npw.value !== npw2.value) {
+            throw new Error("passwords do not match");
+          }
+          await api("/api/password", { method: "POST", body: {
+            current_password: cur.value, new_password: npw.value } });
+          close();
+          renderLogin("password changed — sign in with it now");
+        },
+      });
+    }) }, "Password");
+  const chip = el("span", { id: "user-chip", class: "user-chip" },
+    el("b", {}, u.display_name || u.username),
+    el("span", { class: "meta" },
+      ` ${u.role}${u.role === "viewer" ? " · view-only" : ""}`),
+    changeBtn,
+    el("button", { class: "btn small ghost", onclick: async () => {
+      await api("/api/logout", { method: "POST", body: {} });
+      location.reload();
+    } }, "Sign out"));
+  const hr = document.querySelector(".header-right");
+  hr.insertBefore(chip, hr.firstChild);
 }
 
 async function renderLanding() {
@@ -166,7 +361,67 @@ function spreadsheetTabs() {
     .map((t) => ({ id: `type:${t.key}`, label: t.view, group: t.group || "" }));
 }
 
-function selectTab(id) { state.tab = id; render(); }
+/* ---------- url routing ----------
+   Each tab is a real path (/evidence, /leads, /findings/<type>); the server
+   serves the shell for any page path, so refreshes and shared links land on
+   the right view. ?A=24 / ?F=13 deep-link to a node in the investigation
+   tree (the jump machinery expands the path to it). */
+
+const PAGE_TABS = ["investigation", "timeline", "stack", "artifacts",
+  "coverage", "hosts", "accounts", "evidence"];
+
+function tabToUrl(tabId, jumpTo) {
+  let path;
+  if (tabId === "type:lead") path = "/leads";
+  else if (tabId.startsWith("type:")) path = "/findings/" + tabId.slice(5);
+  else path = "/" + tabId;
+  const q = new URLSearchParams();
+  const m = jumpTo && jumpTo.match(/^node-([AF])(\d+)$/);
+  if (m) q.set(m[1], m[2]);
+  if (tabId === "timeline") {
+    if (state.timeRange.from) q.set("from", state.timeRange.from);
+    if (state.timeRange.to) q.set("to", state.timeRange.to);
+  }
+  const qs = q.toString();
+  return qs ? `${path}?${qs}` : path;
+}
+
+// parse the location into state; false = not a page URL (leave state alone)
+function urlToState() {
+  const path = location.pathname;
+  let tab = null;
+  if (path === "/") tab = "investigation";
+  else if (path === "/leads") tab = "type:lead";
+  else if (path.startsWith("/findings/")) tab = "type:" + path.slice(10);
+  else if (PAGE_TABS.includes(path.slice(1))) tab = path.slice(1);
+  if (!tab) return false;
+  state.tab = tab;
+  const q = new URLSearchParams(location.search);
+  for (const key of ["A", "F"]) {
+    const v = q.get(key);
+    if (v && /^\d+$/.test(String(v).replace(/^[AFaf]/, ""))) {
+      // accept both ?A=24 and ?A=A24
+      state.jumpTo = `node-${key}${String(v).replace(/^[AFaf]/, "")}`;
+      break;
+    }
+  }
+  if (tab === "timeline") {
+    // "YYYY-MM-DD" or "YYYY-MM-DD HH:MM[:SS]" — anything else is dropped
+    const clean = (v) => (v || "").replace(/[^\d: -]/g, "").trim();
+    state.timeRange = { from: clean(q.get("from")), to: clean(q.get("to")) };
+  }
+  return true;
+}
+
+function selectTab(id) {
+  state.tab = id;
+  history.pushState(null, "", tabToUrl(id, null));
+  render();
+}
+
+window.addEventListener("popstate", () => {
+  if (urlToState()) render();
+});
 
 function spreadsheetDropdown(sheets) {
   const active = sheets.find((s) => s.id === state.tab);
@@ -244,6 +499,9 @@ async function refreshInfo() {
 }
 
 async function render() {
+  // keep the address bar in sync (in place — tab switches push real history
+  // entries in selectTab; ref-link jumps just update the current one)
+  history.replaceState(null, "", tabToUrl(state.tab, state.jumpTo));
   buildTabs();
   updateCounts();
   const view = document.getElementById("view");
@@ -937,10 +1195,14 @@ function accountPicker(initial, opts = {}) {
 /* one-line "N host(s): a, b, c +4 more" summary for read-only host notes */
 // a labelled free-text block so notes/detail read as a field, consistent
 // across action, finding and lead cards
-function labeledBlock(label, text) {
+function labeledBlock(label, text, opts = {}) {
+  // structured: multi-line data (run tables, per-line event lists) reads as a
+  // monospace block so columns of timestamps/record-ids line up instead of
+  // wrapping as prose
   return el("div", { class: "labeled-block" },
     el("div", { class: "block-label" }, label),
-    el("div", { class: "block-text" }, text));
+    el("div", { class: "block-text" + (opts.structured ? " structured" : "") },
+      text));
 }
 
 function hostNames(hosts) {
@@ -1788,11 +2050,14 @@ function findingCard(f) {
   // a lead is a worklist, not an indicator — don't show host-indicator-style
   // artifact chips on it (its worklist lives in the Leads tab)
   const isLateral = f.ftype === "lateral";
-  const chips = Object.entries(f.attrs || {})
+  const a = f.attrs || {};
+  const chips = Object.entries(a)
     .filter(([k, v]) => v && (!isLead || k === "source")
       // lateral: source/dest render as one directional chip instead
-      && (!isLateral || (k !== "source_host" && k !== "dest_host")));
-  const a = f.attrs || {};
+      && (!isLateral || (k !== "source_host" && k !== "dest_host"))
+      // artifact is auto-filled from the path's basename — showing both just
+      // repeats the same long string twice
+      && !(k === "artifact" && a.path && v === basename(a.path)));
   const arrow = isLateral && (a.source_host || a.dest_host)
     ? el("span", { class: "lateral-arrow" },
         el("b", {}, a.source_host || "?"), " ⟶ ", el("b", {}, a.dest_host || "?"))
@@ -1800,7 +2065,9 @@ function findingCard(f) {
   if (chips.length || arrow) {
     card.append(el("div", { class: "attr-chips" },
       arrow,
-      chips.map(([k, v]) => el("span", {}, el("b", {}, k.replaceAll("_", " ") + ": "),
+      chips.map(([k, v]) => el("span",
+        { title: `${k.replaceAll("_", " ")}: ${v}` },
+        el("b", {}, k.replaceAll("_", " ") + ": "),
         (k === "path" || k === "sid") ? el("code", { class: "mono" }, v) : v))));
   }
   const hashes = Object.entries(f.hashes || {}).filter(([, v]) => v);
@@ -1818,7 +2085,7 @@ function findingCard(f) {
       card.append(el("details", { class: "output" },
         el("summary", {}, "worklist detail"), el("pre", {}, f.detail)));
     } else {
-      card.append(labeledBlock("Detail", f.detail));
+      card.append(labeledBlock("Detail", f.detail, { structured: true }));
     }
   }
   // a lead's triage worklist lives right in the card, editable in place;
@@ -2284,6 +2551,15 @@ async function renderCoverage(view) {
 
 /* ---------- timeline ---------- */
 
+// range match on normalized "YYYY-MM-DD HH:MM[:SS]" strings: `from` is a
+// plain >= compare; `to` compares only its own precision, so a date-only
+// bound includes that whole day
+function inTimeRange(ev, from, to) {
+  if (from && ev < from) return false;
+  if (to && ev.slice(0, to.length) > to) return false;
+  return true;
+}
+
 async function renderTimeline(view) {
   const rows = await api("/api/timeline");
   if (!rows.length) {
@@ -2291,10 +2567,35 @@ async function renderTimeline(view) {
       "Findings appear here when they have an event time — the moment something happened in the incident.");
     return;
   }
+  const { from, to } = state.timeRange;
+  const shown = rows.filter((f) => inTimeRange(f.event_time, from, to));
+
+  const rangeInput = (key, value) => {
+    const inp = el("input", { class: "mono time-range-input", value,
+      placeholder: "YYYY-MM-DD [HH:MM]", autocomplete: "off" });
+    const apply = () => {
+      state.timeRange[key] = inp.value.replace(/[^\d: -]/g, "").trim();
+      render();  // render() mirrors the range into the URL
+    };
+    inp.addEventListener("change", apply);
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(); });
+    return inp;
+  };
+  const filterBar = el("div", { class: "toolbar" },
+    el("span", { class: "hint" }, "From"), rangeInput("from", from),
+    el("span", { class: "hint" }, "To"), rangeInput("to", to),
+    (from || to) ? el("button", { class: "btn small ghost", onclick: () => {
+      state.timeRange = { from: "", to: "" };
+      render();
+    } }, "Clear") : null,
+    el("span", { class: "hint" },
+      from || to ? `${shown.length} of ${rows.length} events in range`
+                 : `${rows.length} events`));
+
   const table = el("table", {},
     el("thead", {}, el("tr", {},
       ["Date / Time", "Means", "Host", "Activity", "Type", "Ref"].map((h) => el("th", {}, h)))),
-    el("tbody", {}, rows.map((f) => el("tr", {},
+    el("tbody", {}, shown.map((f) => el("tr", {},
       el("td", { class: "mono" }, f.event_time),
       el("td", { class: "meta" }, f.time_kind || "—"),
       el("td", {}, f.host),
@@ -2305,7 +2606,11 @@ async function renderTimeline(view) {
     el("p", { class: "hint" },
       "All event times are UTC. “Means” records what the timestamp is — a "
       + "shimcache time is a file modification, not an execution."),
-    el("div", { class: "table-wrap" }, table));
+    filterBar,
+    el("div", { class: "table-wrap" },
+      shown.length ? table
+        : el("p", { class: "hint", style: "padding:12px" },
+            "no events in this range")));
 }
 
 /* ---------- category views ---------- */

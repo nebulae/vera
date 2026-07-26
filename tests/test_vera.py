@@ -871,27 +871,69 @@ def test_cli_no_active_case(tmp_path, monkeypatch, capsys):
 # ---- server ------------------------------------------------------------
 
 @pytest.fixture
-def running_server(case):
+def running_server(case, tmp_path):
     build_sample(case)
     from http.server import ThreadingHTTPServer
     from vera.server import Handler
     Handler.case_path = case.path
+    Handler.users_path = str(tmp_path / "users.db")
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
+    _bootstrap_admin(httpd.server_address[1])
     yield httpd.server_address[1]
     httpd.shutdown()
+    _SESSION["cookie"] = ""
 
 
-def _req(port, method, path, body=None):
+# session cookie shared by _req: fixtures bootstrap an admin and stash it
+# here, so every existing test runs authenticated (admin ⊇ investigator)
+_SESSION = {"cookie": ""}
+ADMIN_PW = "correct horse battery st@ple 9"
+
+
+def _req(port, method, path, body=None, cookie=None, csrf=True):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    headers = {"Content-Type": "application/json"} if body is not None else {}
+    headers = {}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    if csrf:
+        headers["X-Vera"] = "1"
+    c = _SESSION["cookie"] if cookie is None else cookie
+    if c:
+        headers["Cookie"] = c
     conn.request(method, path, json.dumps(body) if body is not None else None,
                  headers)
     res = conn.getresponse()
     raw = res.read()
     conn.close()
     return res.status, raw
+
+
+def _login(port, username, password):
+    """POST /api/login, returning the session cookie string."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", "/api/login",
+                 json.dumps({"username": username, "password": password}),
+                 {"Content-Type": "application/json", "X-Vera": "1"})
+    res = conn.getresponse()
+    raw = res.read()
+    set_cookie = res.getheader("Set-Cookie") or ""
+    conn.close()
+    return res.status, raw, set_cookie.split(";")[0]
+
+
+def _bootstrap_admin(port):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", "/api/bootstrap",
+                 json.dumps({"username": "trinity", "password": ADMIN_PW,
+                             "display_name": "Trinity"}),
+                 {"Content-Type": "application/json", "X-Vera": "1"})
+    res = conn.getresponse()
+    res.read()
+    assert res.status == 200, "bootstrap failed"
+    _SESSION["cookie"] = (res.getheader("Set-Cookie") or "").split(";")[0]
+    conn.close()
 
 
 def test_api_read(running_server):
@@ -910,6 +952,17 @@ def test_api_read(running_server):
     status, raw = _req(port, "GET", "/")
     assert status == 200 and b"vera" in raw
 
+    # SPA page routes serve the shell so refreshes/deep links work…
+    for path in ("/evidence", "/leads", "/findings/malware",
+                 "/investigation?F=1"):
+        status, raw = _req(port, "GET", path)
+        assert status == 200 and b"app.js" in raw, path
+    # …but unknown API paths still 404 and static files still resolve
+    status, _ = _req(port, "GET", "/api/nope")
+    assert status == 404
+    status, raw = _req(port, "GET", "/app.js")
+    assert status == 200 and b"function" in raw
+
     status, raw = _req(port, "GET", "/api/export/md")
     assert status == 200 and b"windows.pstree" in raw
 
@@ -921,11 +974,14 @@ def blank_server(tmp_path, monkeypatch):
     from vera.server import Handler
     Handler.case_path = None
     Handler.case_dir = str(tmp_path)
+    Handler.users_path = str(tmp_path / "users.db")
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
+    _bootstrap_admin(httpd.server_address[1])
     yield httpd.server_address[1]
     httpd.shutdown()
+    _SESSION["cookie"] = ""
 
 
 def test_create_and_open_case_via_api(blank_server):
@@ -947,6 +1003,139 @@ def test_create_and_open_case_via_api(blank_server):
 
     status, raw = _req(port, "POST", "/api/cases", {"name": ""})
     assert status == 400
+
+
+def test_password_policy_and_hashing():
+    from vera import auth
+    assert auth.password_problems("short")
+    assert auth.password_problems("alllowercase12")        # 12–15, 1 class
+    assert not auth.password_problems("Str0ng-enough")     # 13, 3 classes
+    assert not auth.password_problems("this is a long passphrase")  # 16+
+    assert auth.password_problems("Password2025!") == []   # fine…
+    assert auth.password_problems("password2025")          # …blocklisted
+    assert auth.password_problems("trinity-Secret99x", "trinity")
+    h = auth.hash_password("some passphrase here")
+    assert h.startswith("scrypt$")
+    assert auth.verify_password(h, "some passphrase here")
+    assert not auth.verify_password(h, "wrong")
+    assert not auth.verify_password("garbage", "x")
+
+
+def test_users_db(tmp_path):
+    from vera.auth import AuthError, UsersDB
+    db = UsersDB(str(tmp_path / "u.db"))
+    assert db.needs_bootstrap()
+    uid = db.create_user("trinity", "admin", password="a strong passphrase!")
+    assert not db.needs_bootstrap()
+    with pytest.raises(AuthError):
+        db.create_user("TRINITY", "viewer", password="another strong one!!")
+    with pytest.raises(AuthError):
+        db.create_user("bad name!", "viewer")
+    with pytest.raises(AuthError):
+        db.create_user("weakling", "viewer", password="short")
+    assert db.authenticate("TRINITY", "a strong passphrase!")["role"] == "admin"
+
+    # lockout: repeated failures lock even the correct password out
+    for _ in range(6):
+        with pytest.raises(AuthError):
+            db.authenticate("trinity", "wrong password here")
+    with pytest.raises(AuthError):
+        db.authenticate("trinity", "a strong passphrase!")
+
+    tok = db.create_session(uid)
+    assert db.session_user(tok)["username"] == "trinity"
+    assert db.session_user("nope") is None
+    db.delete_session(tok)
+    assert db.session_user(tok) is None
+
+    # password change kills existing sessions
+    tok = db.create_session(uid)
+    db.set_password(uid, "a different passphrase")
+    assert db.session_user(tok) is None
+
+    # reset tokens: policy checked before burn, then single-use
+    rt = db.create_reset_token(uid)
+    with pytest.raises(AuthError):
+        db.reset_password(rt, "weak")
+    db.reset_password(rt, "a brand new passphrase")
+    with pytest.raises(AuthError):
+        db.reset_password(rt, "yet another passphrase")
+
+    # disabling a user kills sessions and blocks login
+    tok = db.create_session(uid)
+    db.update_user(uid, disabled=True)
+    assert db.session_user(tok) is None
+    with pytest.raises(AuthError):
+        db.authenticate("trinity", "a brand new passphrase")
+
+
+def test_auth_and_roles(running_server):
+    port = running_server
+    # unauthenticated: page shell serves, API is locked, CSRF header required
+    st, _ = _req(port, "GET", "/evidence", cookie="")
+    assert st == 200
+    st, _ = _req(port, "GET", "/api/case", cookie="")
+    assert st == 401
+    st, _ = _req(port, "POST", "/api/actions", {"command": "x"}, csrf=False)
+    assert st == 403
+    # bootstrap is one-shot
+    st, _ = _req(port, "POST", "/api/bootstrap",
+                 {"username": "evil", "password": ADMIN_PW}, cookie="")
+    assert st == 403
+
+    # admin creates a viewer and an investigator
+    st, _ = _req(port, "POST", "/api/users",
+                 {"username": "vw", "role": "viewer",
+                  "password": "viewer passphrase ok"})
+    assert st == 201
+    # ("investigator pass ok" would be rejected — it contains username "inv")
+    st, _ = _req(port, "POST", "/api/users",
+                 {"username": "inv", "role": "investigator",
+                  "password": "sleuthing pass is fine"})
+    assert st == 201
+    st, _, vw = _login(port, "vw", "viewer passphrase ok")
+    assert st == 200
+    st, _, inv = _login(port, "inv", "sleuthing pass is fine")
+    assert st == 200
+
+    # admin-set passwords are flagged for rotation
+    st, raw = _req(port, "GET", "/api/auth", cookie=vw)
+    assert json.loads(raw)["user"]["must_change_password"] is True
+
+    # viewer: read-only, no user admin
+    st, _ = _req(port, "GET", "/api/tree", cookie=vw)
+    assert st == 200
+    st, _ = _req(port, "POST", "/api/actions", {"command": "x"}, cookie=vw)
+    assert st == 403
+    st, _ = _req(port, "GET", "/api/users", cookie=vw)
+    assert st == 403
+    # investigator: writes yes, user admin no
+    st, _ = _req(port, "POST", "/api/actions", {"command": "whoami"},
+                 cookie=inv)
+    assert st == 201
+    st, _ = _req(port, "POST", "/api/users",
+                 {"username": "zz", "role": "viewer"}, cookie=inv)
+    assert st == 403
+
+    # bad login rejected; logout invalidates the session
+    st, _, _c = _login(port, "vw", "wrong password wrong")
+    assert st == 403
+    st, _ = _req(port, "POST", "/api/logout", {}, cookie=vw)
+    assert st == 200
+    st, _ = _req(port, "GET", "/api/tree", cookie=vw)
+    assert st == 401
+
+    # passwordless creation hands back a reset token; user sets their own
+    st, raw = _req(port, "POST", "/api/users",
+                   {"username": "newbie", "role": "viewer"})
+    data = json.loads(raw)
+    assert st == 201 and data["reset_token"]
+    st, _ = _req(port, "POST", "/api/password",
+                 {"reset_token": data["reset_token"],
+                  "new_password": "a fresh set passphrase!"}, cookie="")
+    assert st == 200
+    st, _, _c = _login(port, "newbie", "a fresh set passphrase!")
+    assert st == 200
 
 
 def test_accounts_api(running_server):

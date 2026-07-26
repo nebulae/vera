@@ -1005,6 +1005,52 @@ def test_create_and_open_case_via_api(blank_server):
     assert status == 400
 
 
+def test_admin_user_management(running_server):
+    port = running_server  # bootstrapped admin 'trinity' in _SESSION cookie
+    # create a user with a one-time reset code (no password set)
+    st, raw = _req(port, "POST", "/api/users",
+                   {"username": "neo", "role": "investigator",
+                    "display_name": "Neo"})
+    data = json.loads(raw)
+    assert st == 201 and data["reset_token"]
+    uid = data["id"]
+
+    # list + role change + disable via the admin API
+    users = json.loads(_req(port, "GET", "/api/users")[1])
+    assert {u["username"] for u in users} == {"trinity", "neo"}
+    st, _ = _req(port, "PATCH", f"/api/users/{uid}", {"role": "viewer"})
+    assert st == 200
+    st, _ = _req(port, "PATCH", f"/api/users/{uid}", {"disabled": True})
+    assert st == 200
+    # a disabled user can't sign in even after setting a password via the code
+    st, _ = _req(port, "POST", "/api/password",
+                 {"reset_token": data["reset_token"],
+                  "new_password": "a fresh clean passphrase"}, cookie="")
+    assert st == 200
+    st, _, _c = _login(port, "neo", "a fresh clean passphrase")
+    assert st == 403
+
+    # a fresh one-time code (admin re-issues), plus re-enable
+    st, raw = _req(port, "POST", f"/api/users/{uid}/reset_token", {})
+    assert st == 201 and json.loads(raw)["reset_token"]
+    _req(port, "PATCH", f"/api/users/{uid}", {"disabled": False})
+
+    # last-admin guard: trinity can't demote or disable themselves
+    admin_id = next(u["id"] for u in users if u["username"] == "trinity")
+    st, _ = _req(port, "PATCH", f"/api/users/{admin_id}", {"role": "viewer"})
+    assert st == 403
+    st, _ = _req(port, "PATCH", f"/api/users/{admin_id}", {"disabled": True})
+    assert st == 403
+    # …but once a second admin exists, it's allowed
+    _req(port, "PATCH", f"/api/users/{uid}", {"role": "admin"})
+    st, _ = _req(port, "PATCH", f"/api/users/{admin_id}", {"role": "investigator"})
+    assert st == 200
+
+    # the /admin page shell is served (SPA route) and API stays admin-gated
+    st, raw = _req(port, "GET", "/admin/users", cookie="")
+    assert st == 200 and b"app.js" in raw
+
+
 def test_case_membership_and_attribution(tmp_path):
     from vera.db import Case, CaseError
     p = str(tmp_path / "m.vera")
@@ -1120,7 +1166,14 @@ def test_users_db(tmp_path):
     with pytest.raises(AuthError):
         db.reset_password(rt, "yet another passphrase")
 
-    # disabling a user kills sessions and blocks login
+    # last-admin guard: can't disable/demote the only active admin…
+    with pytest.raises(AuthError):
+        db.update_user(uid, disabled=True)
+    with pytest.raises(AuthError):
+        db.update_user(uid, role="viewer")
+    # …but with a second admin present it's allowed — and disabling a user
+    # kills their sessions and blocks login
+    db.create_user("morpheus", "admin", password="a second strong passphrase")
     tok = db.create_session(uid)
     db.update_user(uid, disabled=True)
     assert db.session_user(tok) is None

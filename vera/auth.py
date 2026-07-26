@@ -203,6 +203,11 @@ class UsersDB:
                  int(must_change), _now()))
         return cur.lastrowid
 
+    def _enabled_admin_count(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) AS n FROM users "
+            "WHERE role = 'admin' AND disabled = 0").fetchone()["n"]
+
     def _find(self, username: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
@@ -240,7 +245,15 @@ class UsersDB:
             fields["disabled"] = int(bool(fields["disabled"]))
         if not fields:
             raise AuthError("nothing to update")
-        self.get_user(user_id)  # existence check
+        current = self.get_user(user_id)  # existence check
+        # never strand the system with no way in: block demoting/disabling the
+        # last enabled admin
+        losing_admin = (current["role"] == "admin"
+                        and (fields.get("role", "admin") != "admin"
+                             or fields.get("disabled")))
+        if losing_admin and self._enabled_admin_count() <= 1:
+            raise AuthError("this is the only active admin — promote another "
+                            "admin before changing this one")
         cols = ", ".join(f"{k} = ?" for k in fields)
         with self.conn:
             self.conn.execute(f"UPDATE users SET {cols} WHERE id = ?",

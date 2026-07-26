@@ -637,6 +637,11 @@ class Case:
             except sqlite3.DatabaseError:
                 raise CaseError(f"not a vera case file: {path}") from None
             self._migrate()
+        # several users can hit one case through the web server: WAL lets
+        # readers proceed during a write, busy_timeout absorbs write overlap
+        # (set after validation — these pragmas touch the file)
+        self.conn.execute("PRAGMA busy_timeout = 5000")
+        self.conn.execute("PRAGMA journal_mode = WAL")
 
     def _migrate(self) -> None:
         """Bring an older case file up to the current SCHEMA_VERSION."""

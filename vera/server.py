@@ -13,7 +13,9 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from . import auth as authmod
 from . import export, types
+from .auth import AuthError, UsersDB
 from .db import Case, CaseError
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
@@ -51,6 +53,7 @@ def _set_active_case(path: str) -> None:
 class Handler(BaseHTTPRequestHandler):
     case_path: str | None = None  # active case; None = show New Investigation screen
     case_dir: str = "."           # where .vera files live and get created
+    users_path: str = "vera-users.db"  # global users/sessions DB (not per-case)
 
     # -- plumbing -------------------------------------------------------------
 
@@ -85,6 +88,41 @@ class Handler(BaseHTTPRequestHandler):
             raise CaseError("no active investigation — create or open one first")
         return Case(self.case_path)
 
+    # -- auth plumbing --------------------------------------------------------
+
+    def _cookie_token(self) -> str:
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            key, _, val = part.strip().partition("=")
+            if key == "vera_session":
+                return val
+        return ""
+
+    def _require_user(self, *roles: str) -> dict | None:
+        """The session's user, or None after sending 401/403."""
+        with UsersDB(Handler.users_path) as udb:
+            user = udb.session_user(self._cookie_token())
+        if user is None:
+            self._error("authentication required", 401)
+            return None
+        if roles and user["role"] not in roles:
+            self._error("forbidden", 403)
+            return None
+        return user
+
+    def _json_with_cookie(self, data, token: str, clear: bool = False) -> None:
+        body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        cookie = ("vera_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+                  if clear else
+                  f"vera_session={token}; Path=/; HttpOnly; SameSite=Lax; "
+                  f"Max-Age={authmod.SESSION_MAX_TTL}")
+        self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        self.wfile.write(body)
+
     @classmethod
     def _list_cases(cls) -> list[dict]:
         out = []
@@ -107,12 +145,44 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(WEB_DIR, name), "rb") as fh:
                 self._send(200, fh.read(), ctype)
             return
+        # SPA page routes (/evidence, /leads, /findings/<type>, /investigation
+        # ?A=24 …): serve the shell and let the frontend router pick the view,
+        # so deep links and refreshes land on the right page. The shell itself
+        # needs no auth — it shows the login screen.
+        if (not url.path.startswith("/api/")
+                and "." not in url.path.rsplit("/", 1)[-1]):
+            name, ctype = STATIC["/"]
+            with open(os.path.join(WEB_DIR, name), "rb") as fh:
+                self._send(200, fh.read(), ctype)
+            return
         try:
+            if url.path == "/api/auth":
+                self._auth_status()
+                return
+            user = self._require_user()
+            if user is None:
+                return
+            if url.path == "/api/users":
+                if user["role"] != "admin":
+                    self._error("admin only", 403)
+                    return
+                with UsersDB(Handler.users_path) as udb:
+                    self._json(udb.users())
+                return
             self._api_get(url)
+        except AuthError as exc:
+            self._error(str(exc), 403)
         except CaseError as exc:
             self._error(str(exc))
         except Exception as exc:  # keep the viewer alive on bugs
             self._error(f"internal error: {exc}", 500)
+
+    def _auth_status(self) -> None:
+        with UsersDB(Handler.users_path) as udb:
+            needs = udb.needs_bootstrap()
+            user = None if needs else udb.session_user(self._cookie_token())
+        self._json({"needs_bootstrap": needs,
+                    "authenticated": user is not None, "user": user})
 
     def do_POST(self):
         self._mutate("POST")
@@ -124,14 +194,107 @@ class Handler(BaseHTTPRequestHandler):
         self._mutate("DELETE")
 
     def _mutate(self, method: str):
+        url = urlparse(self.path)
         try:
-            self._api_mutate(method, urlparse(self.path))
+            body = self._body()
+            # cheap CSRF backstop: a cross-site HTML form can't set custom
+            # headers, our frontend always sends this one
+            if self.headers.get("X-Vera") is None:
+                self._error("missing X-Vera header", 403)
+                return
+            if method == "POST" and url.path in (
+                    "/api/bootstrap", "/api/login", "/api/logout",
+                    "/api/password"):
+                self._auth_mutate(url.path, body)
+                return
+            user = self._require_user()
+            if user is None:
+                return
+            if url.path == "/api/users" or url.path.startswith("/api/users/"):
+                if user["role"] != "admin":
+                    self._error("admin only", 403)
+                    return
+                self._users_mutate(method, url, body)
+                return
+            if user["role"] not in ("admin", "investigator"):
+                self._error("viewers have read-only access", 403)
+                return
+            self._api_mutate(method, url, body)
+        except AuthError as exc:
+            self._error(str(exc), 403)
         except CaseError as exc:
             self._error(str(exc))
         except json.JSONDecodeError:
             self._error("invalid JSON body")
         except Exception as exc:
             self._error(f"internal error: {exc}", 500)
+
+    # -- auth endpoints -------------------------------------------------------
+
+    def _auth_mutate(self, path: str, body: dict) -> None:
+        with UsersDB(Handler.users_path) as udb:
+            if path == "/api/bootstrap":
+                # first run only: create the initial admin and sign them in
+                if not udb.needs_bootstrap():
+                    raise AuthError("already set up — sign in instead")
+                uid = udb.create_user(
+                    body.get("username", ""), "admin",
+                    password=body.get("password", ""),
+                    display_name=body.get("display_name", ""))
+                self._json_with_cookie(
+                    {"ok": True, "user": udb.get_user(uid)},
+                    udb.create_session(uid))
+            elif path == "/api/login":
+                user = udb.authenticate(body.get("username", ""),
+                                        body.get("password", ""))
+                self._json_with_cookie({"ok": True, "user": user},
+                                       udb.create_session(user["id"]))
+            elif path == "/api/logout":
+                udb.delete_session(self._cookie_token())
+                self._json_with_cookie({"ok": True}, "", clear=True)
+            else:  # /api/password: self-service change, or via a reset code
+                if body.get("reset_token"):
+                    udb.reset_password(body["reset_token"],
+                                       body.get("new_password", ""))
+                    self._json({"ok": True})
+                    return
+                user = udb.session_user(self._cookie_token())
+                if user is None:
+                    self._error("authentication required", 401)
+                    return
+                udb.change_password(user["id"],
+                                    body.get("current_password", ""),
+                                    body.get("new_password", ""))
+                self._json({"ok": True})
+
+    def _users_mutate(self, method: str, url, body: dict) -> None:
+        """Admin-only user management."""
+        with UsersDB(Handler.users_path) as udb:
+            if method == "POST" and url.path == "/api/users":
+                # with a password: usable immediately (flagged to rotate it);
+                # without: account starts locked, admin hands over a reset code
+                password = body.get("password") or None
+                uid = udb.create_user(
+                    body.get("username", ""), body.get("role", "viewer"),
+                    password=password,
+                    display_name=body.get("display_name", ""),
+                    must_change=password is not None)
+                out = {"id": uid, "user": udb.get_user(uid)}
+                if password is None:
+                    out["reset_token"] = udb.create_reset_token(uid)
+                self._json(out, 201)
+                return
+            m = re.fullmatch(r"/api/users/(\d+)/reset_token", url.path)
+            if m and method == "POST":
+                self._json({"reset_token":
+                            udb.create_reset_token(int(m.group(1)))}, 201)
+                return
+            m = re.fullmatch(r"/api/users/(\d+)", url.path)
+            if m and method == "PATCH":
+                udb.update_user(int(m.group(1)), **body)
+                self._json({"ok": True})
+                return
+            self._error("not found", 404)
 
     # -- GET endpoints ----------------------------------------------------------
 
@@ -212,8 +375,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- POST / PATCH endpoints ---------------------------------------------------
 
-    def _api_mutate(self, method: str, url):
-        body = self._body()
+    def _api_mutate(self, method: str, url, body: dict):
         if method == "POST" and url.path == "/api/cases":
             self._create_case(body)
             return
@@ -508,6 +670,8 @@ def serve(case_path: str | None, port: int = 8845, open_browser: bool = True,
     Handler.case_path = os.path.abspath(case_path) if case_path else None
     Handler.case_dir = os.path.abspath(
         case_dir or (os.path.dirname(case_path) if case_path else os.getcwd()))
+    # global users/sessions DB lives beside the case files, never inside one
+    Handler.users_path = os.path.join(Handler.case_dir, "vera-users.db")
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
     where = case_path or f"New Investigation screen — cases in {Handler.case_dir}"

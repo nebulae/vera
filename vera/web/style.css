@@ -362,6 +362,20 @@ details.output pre {
   color: var(--muted); font-weight: 600; margin-bottom: 2px;
 }
 .block-text { font-size: 14px; white-space: pre-wrap; }
+/* multi-line structured detail (run tables, per-event lists): monospace on a
+   code background, one record per line, horizontal scroll instead of wrapping
+   so timestamp/record-id columns stay aligned */
+.block-text.structured {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px 11px;
+  margin-top: 3px;
+}
 
 .checkbox-field { display: flex; align-items: center; gap: 8px; cursor: pointer;
   color: var(--ink); font-size: 14px; }
@@ -383,6 +397,11 @@ details.output pre {
   background: color-mix(in srgb, var(--ink) 6%, transparent);
   border-radius: 5px;
   padding: 1px 7px;
+  /* long values (full task paths with SIDs) ellipsize; full text on hover */
+  max-width: 60ch;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .attr-chips b { font-weight: 600; color: var(--muted); }
 .node-tools { display: flex; gap: 6px; margin-top: 8px; }
@@ -984,7 +1003,27 @@ table.art-members { margin-top: 4px; }
 
 /* worklist as a compact, aligned table */
 .lead-scroll { margin-top: 10px; overflow-x: auto; }
-table.lead-table { width: 100%; font-size: 13px; border-collapse: collapse; }
+.user-chip { display: inline-flex; align-items: center; gap: 7px; }
+.user-chip b { color: var(--ink); font-size: 13px; }
+.reset-form { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.time-range-input {
+  width: 17ch; font-size: 13px; padding: 4px 8px;
+  color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 7px;
+}
+.followups > summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+.followups .lead-scroll { margin-top: 6px; }
+/* fixed layout: status/investigation/delete get set widths, the item column
+   takes the rest and long labels wrap inside it — the table can never grow
+   wider than the card, so no horizontal scrollbar */
+table.lead-table {
+  width: 100%; font-size: 13px; border-collapse: collapse;
+  table-layout: fixed;
+}
+table.lead-table th:nth-child(3) { width: 250px; }
+table.lead-table th:nth-child(4) { width: 56px; }
+td.lead-resolved { width: 250px; }
+td.lead-x { width: 56px; }
 table.lead-table th {
   text-align: left; font-size: 11px; text-transform: uppercase;
   letter-spacing: 0.04em; color: var(--muted); font-weight: 600;
@@ -995,12 +1034,12 @@ table.lead-table td {
   vertical-align: middle;
 }
 table.lead-table tbody tr:last-child td { border-bottom: none; }
-.lead-th-status, .lead-status-cell { width: 1%; white-space: nowrap; }
+.lead-th-status, .lead-status-cell { width: 112px; white-space: nowrap; }
 .lead-status-cell { border-left: 3px solid transparent; }
 .lead-tr.st-item-triaged   td.lead-status-cell { border-left-color: #16a34a; }
 .lead-tr.st-item-open       td.lead-status-cell { border-left-color: var(--star); }
 .lead-tr.st-item-dismissed  td.lead-status-cell { border-left-color: var(--muted); }
-.lead-label { font-family: var(--mono); font-weight: 600; white-space: nowrap; }
+.lead-label { font-family: var(--mono); font-weight: 600; overflow-wrap: break-word; }
 .lead-tr.st-item-dismissed .lead-label { text-decoration: line-through; opacity: 0.55; }
 .lead-resolved { width: 100%; }
 .lead-investigate { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -1030,6 +1069,11 @@ table.lead-table tbody tr:last-child td { border-bottom: none; }
 }
 .icon-x:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
 .lead-add-tr td { border-top: 1px dashed var(--line); border-bottom: none !important; padding-top: 8px; }
+/* when the add row is the table's only row (no items yet, no header), it
+   alone determines the fixed-layout column widths — mirror the real ones */
+.lead-add-tr td:first-child { width: 112px; }
+.lead-add-tr td:nth-child(3) { width: 250px; }
+.lead-add-tr td:nth-child(4) { width: 56px; }
 .lead-add-tr input { width: 100%; }
 .lead-add-label {
   font: inherit; font-size: 13px; padding: 4px 8px;

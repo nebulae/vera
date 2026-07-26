@@ -233,7 +233,36 @@ everything that was ever entered.
 
 Commands use, in order of precedence: `--case PATH`, `$VERA_CASE`, or the
 case selected with `vera use PATH` (stored in `~/.config/vera/active`).
-A case is a single SQLite file — copy it, zip it, hand it to a teammate.
+
+## Files & where they live
+
+Everything is plain SQLite on disk — no database server to run.
+
+- **`<name>.vera`** — the case itself: one self-contained SQLite file holding
+  the whole investigation (actions, findings, evidence, hosts, accounts,
+  screenshots, audit log, and — once you have collaborators — the case's member
+  list). **This is the file you share:** copy it, zip it, hand it to a
+  teammate; its SHA-256 is its chain of custody. It's created wherever you point
+  `vera init <path>.vera`. In the browser, `vera serve` lists and creates cases
+  in its **case directory** — the `--dir` you pass, else the active case's
+  folder, else the current working directory.
+- **`vera-users.db`** — the global accounts/sessions database (users, roles,
+  salted+hashed passwords, login sessions, reset tokens). Created in the case
+  directory the first time you `vera serve` with users. It is **not** part of
+  any case and spans all of them — **do not share it or commit it**; it holds
+  password hashes and is specific to one server install. (git-ignored by
+  default.)
+- **`<name>.vera-wal` / `<name>.vera-shm`** — SQLite write-ahead-log sidecars,
+  created while a case is open so multiple people can read during a write.
+  Transient; they fold back into the `.vera` file on a clean close. No need to
+  copy them when sharing.
+- **`<name>.vera.pre-v<N>`** — an automatic backup vera takes *before* a schema
+  migration upgrades an older case, so a bad upgrade can never eat the only
+  copy. Safe to archive or delete once you've confirmed the upgraded case opens.
+
+So to hand off an investigation, share only the `.vera` file. To move a whole
+**team server**, copy the case directory *including* `vera-users.db` (keep it
+private — it's your credential store).
 
 ## Development
 

@@ -1005,6 +1005,65 @@ def test_create_and_open_case_via_api(blank_server):
     assert status == 400
 
 
+def test_case_membership_and_attribution(tmp_path):
+    from vera.db import Case, CaseError
+    p = str(tmp_path / "m.vera")
+    c = Case(p, create=True, actor="trinity")
+    c.set_meta(name="M")
+    c.add_member("trinity", role="lead", added_by="trinity")
+    assert c.lead() == "trinity"
+    assert c.member_role("trinity") == "lead"
+    assert c.member_role("nobody") is None
+
+    # attribution flows from the connection's actor onto new records
+    a = c.add_action(command="whoami")
+    f = c.add_finding("something", action_id=a)
+    assert c.get_action(a)["created_by"] == "trinity"
+    assert c.get_finding(f)["created_by"] == "trinity"
+
+    # add investigators; a second lead is refused, reassignment demotes the old
+    c.add_member("neo", role="investigator", added_by="trinity")
+    with pytest.raises(CaseError):
+        c.add_member("switch", role="lead", added_by="trinity")
+    c.set_lead("neo", added_by="trinity")
+    assert c.lead() == "neo"
+    assert c.member_role("trinity") == "investigator"  # demoted
+    # can't remove the current lead
+    with pytest.raises(CaseError):
+        c.remove_member("neo")
+    c.remove_member("trinity")
+    assert c.member_role("trinity") is None
+
+    # a different actor's edits are attributed on the audit log
+    c2 = Case(p, actor="neo")
+    c2.update_finding(f, title="renamed")
+    entry = c2.audit(f"F{f}")[0]
+    assert entry["who"] == "neo"
+    c.close(); c2.close()
+
+
+def test_migration_v16_to_v17(tmp_path):
+    # a v16 case migrates: created_by/who columns added, members table created,
+    # legacy rows keep created_by='' and the case starts lead-less
+    from vera.db import Case
+    p = str(tmp_path / "old.vera")
+    c = Case(p, create=True)
+    c.set_meta(name="legacy")
+    a = c.add_action(command="x")
+    c.conn.execute("UPDATE actions SET created_by = ''")  # simulate pre-17
+    with c.conn:
+        c.conn.execute("DROP TABLE case_members")
+        c.conn.execute("UPDATE case_meta SET value='16' WHERE key='schema_version'")
+    c.close()
+    with Case(p, actor="late") as c2:
+        assert c2.lead() is None
+        assert c2.members() == []
+        assert c2.get_action(a)["created_by"] == ""  # legacy row untouched
+        # new records under the migrated case are attributed
+        a2 = c2.add_action(command="y")
+        assert c2.get_action(a2)["created_by"] == "late"
+
+
 def test_password_policy_and_hashing():
     from vera import auth
     assert auth.password_problems("short")
@@ -1109,12 +1168,27 @@ def test_auth_and_roles(running_server):
     assert st == 403
     st, _ = _req(port, "GET", "/api/users", cookie=vw)
     assert st == 403
-    # investigator: writes yes, user admin no
+
+    # investigator not yet a member of this case: writes are gated
     st, _ = _req(port, "POST", "/api/actions", {"command": "whoami"},
                  cookie=inv)
+    assert st == 403
+    # admin (implicit member everywhere) adds inv as a member; now writes pass
+    st, _ = _req(port, "POST", "/api/members",
+                 {"username": "inv", "role": "investigator"})
     assert st == 201
+    st, raw = _req(port, "POST", "/api/actions", {"command": "whoami"},
+                   cookie=inv)
+    assert st == 201
+    # attribution: the action records who logged it
+    tree = json.loads(_req(port, "GET", "/api/tree", cookie=inv)[1])
+    assert any(a["created_by"] == "inv" for a in tree["roots"])
+    # investigator can't manage users or (not being lead) the roster
     st, _ = _req(port, "POST", "/api/users",
                  {"username": "zz", "role": "viewer"}, cookie=inv)
+    assert st == 403
+    st, _ = _req(port, "POST", "/api/members",
+                 {"username": "vw", "role": "investigator"}, cookie=inv)
     assert st == 403
 
     # bad login rejected; logout invalidates the session

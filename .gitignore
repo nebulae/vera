@@ -6,3 +6,5 @@ __pycache__/
 *.vera.pre-v*
 vera-users.db
 vera-users.db-*
+vera-audit.db
+vera-audit.db-*

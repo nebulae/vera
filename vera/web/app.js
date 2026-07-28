@@ -82,7 +82,8 @@ async function boot() {
   ensureAdminButton();
   // /admin is a standalone (case-independent) view, admins only
   if (location.pathname.startsWith("/admin") && state.user.role === "admin") {
-    return renderAdmin();
+    return location.pathname.startsWith("/admin/audit")
+      ? renderAdminAudit() : renderAdmin();
   }
   state.info = await api("/api/case");
   // can this user modify THIS case? admin anywhere; investigator if a member.
@@ -368,9 +369,37 @@ function ensureAdminButton() {
   hr.insertBefore(btn, document.getElementById("user-chip"));
 }
 
-function showAdmin() {
-  history.pushState(null, "", "/admin/users");
-  renderAdmin();
+function showAdmin(section = "users") {
+  history.pushState(null, "", `/admin/${section}`);
+  if (section === "audit") renderAdminAudit();
+  else renderAdmin();
+}
+
+// shared header for the admin views: back-to-case + a Users / Access log switch
+function adminHeader(active) {
+  const seg = (id, label) => el("button",
+    { class: "btn small" + (id === active ? " primary" : ""),
+      onclick: () => showAdmin(id) }, label);
+  const back = el("button", { class: "btn small" }, "← Back to case");
+  back.addEventListener("click", async () => {
+    history.pushState(null, "", "/investigation");
+    await boot();
+  });
+  return el("div", { class: "toolbar" }, back,
+    el("span", { class: "spacer" }), seg("users", "Users"),
+    seg("audit", "Access log"));
+}
+
+function adminShell() {
+  document.body.classList.remove("readonly");
+  document.getElementById("case-title").textContent = "Administration";
+  document.getElementById("case-counts").textContent = "";
+  document.getElementById("tabs").replaceChildren();
+  const exportLink = document.getElementById("export-md");
+  if (exportLink) exportLink.style.display = "none";
+  const bb = document.getElementById("bundle-btn");
+  if (bb) bb.remove();
+  return document.getElementById("view");
 }
 
 const ROLE_BLURB = {
@@ -380,13 +409,7 @@ const ROLE_BLURB = {
 };
 
 async function renderAdmin() {
-  document.body.classList.remove("readonly");
-  document.getElementById("case-title").textContent = "Administration";
-  document.getElementById("case-counts").textContent = "";
-  document.getElementById("tabs").replaceChildren();
-  const exportLink = document.getElementById("export-md");
-  if (exportLink) exportLink.style.display = "none";
-  const view = document.getElementById("view");
+  const view = adminShell();
   view.replaceChildren(el("div", { class: "hint" }, "loading…"));
 
   const users = await api("/api/users");
@@ -470,14 +493,9 @@ async function renderAdmin() {
     renderRows();
   }));
 
-  const backBtn = el("button", { class: "btn small" }, "← Back to case");
-  backBtn.addEventListener("click", async () => {
-    history.pushState(null, "", "/investigation");
-    await boot();
-  });
-
   view.replaceChildren(
-    el("div", { class: "toolbar" }, backBtn, addBtn,
+    adminHeader("users"),
+    el("div", { class: "toolbar" }, addBtn,
       el("span", { class: "hint" },
         "Admins manage accounts here. Roles: "
         + "admin — manages users + full case access · "
@@ -485,6 +503,52 @@ async function renderAdmin() {
         + "viewer — read-only everywhere.")),
     el("div", { class: "table-wrap" }, table),
     err);
+}
+
+async function renderAdminAudit() {
+  const view = adminShell();
+  view.replaceChildren(adminHeader("audit"),
+    el("div", { class: "hint" }, "loading…"));
+  const rows = await api("/api/access_log?limit=500");
+
+  const EVENT_LABEL = {
+    login: "sign-in", login_failed: "failed sign-in", logout: "sign-out",
+    bootstrap: "first admin created", user_create: "user created",
+    user_update: "user changed", reset_issued: "reset code issued",
+    password_change: "password changed", export: "case exported",
+  };
+  const detailText = (r) => {
+    const d = r.detail || {};
+    if (r.event === "export") return `${d.kind || ""} ${d.file || ""}`.trim();
+    if (r.event === "user_create") return `${d.user} as ${d.role}`;
+    if (r.event === "user_update") {
+      return `${d.user}: ${Object.entries(d.changes || {})
+        .map(([k, v]) => `${k}→${v}`).join(", ")}`;
+    }
+    if (r.event === "reset_issued") return d.user || "";
+    if (r.event === "password_change") return d.via ? `via ${d.via}` : "";
+    return "";
+  };
+
+  const table = el("table", { class: "host-grid" },
+    el("thead", {}, el("tr", {}, ["When (UTC)", "Event", "User", "Detail",
+      "Case", "IP"].map((h) => el("th", {}, h)))),
+    el("tbody", {}, rows.map((r) => el("tr",
+      { class: r.event === "login_failed" ? "user-disabled" : "" },
+      el("td", { class: "mono meta" }, r.at),
+      el("td", {}, EVENT_LABEL[r.event] || r.event),
+      el("td", {}, r.who || el("span", { class: "meta" }, "—")),
+      el("td", { class: "meta" }, detailText(r)),
+      el("td", { class: "meta" }, r.case_ref || ""),
+      el("td", { class: "mono meta" }, r.ip || "")))));
+
+  view.replaceChildren(adminHeader("audit"),
+    el("p", { class: "hint" },
+      "Server-wide access & security events — sign-ins, user administration, "
+      + "and every case export. This log is global and never leaves the "
+      + "server (it is not part of any case bundle)."),
+    rows.length ? el("div", { class: "table-wrap" }, table)
+                : el("p", { class: "hint" }, "no events yet"));
 }
 
 function showResetCode(username, code) {

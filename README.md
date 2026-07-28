@@ -9,6 +9,10 @@ recreate the entire investigation, step by step.
 Built to replace the classic FOR508 IR tracking spreadsheet — and it still
 exports spreadsheet-compatible CSVs of all six classic sheets.
 
+Works solo from the CLI, or as a shared multi-user server with accounts, roles,
+per-case membership, and a chain-of-custody export bundle (see *Collaboration &
+access control*).
+
 ## Install
 
 Zero runtime dependencies (Python ≥ 3.10 stdlib only):
@@ -94,7 +98,8 @@ retyping a name.
   screenshot's role is either `output` (a step's result) or `exhibit` (proof on
   a finding or evidence item).
 - **Finding** (`F#`) — something an action showed you. Typed (`malware`,
-  `account`, `host`, `netindicator`, `hostindicator`, `event`, `note`) with
+  `account`, `host`, `netindicator`, `hostindicator`, `lateral`, `filesystem`,
+  `event`, `lead`, `note`) with
   type-specific fields. Host-based indicators carry a stackable **artifact
   name** (e.g. `CRYPTBASE.dll`) *and* its **full path** as separate fields — the
   name is what you stack on, the path pins the location; paste a path and the
@@ -116,6 +121,31 @@ retyping a name.
   work needs none). Each host also carries a **disposition** (`unknown` /
   `clean` / `suspicious` / `compromised`) — set it as triage progresses and the
   compromised-hosts view derives itself instead of being maintained by hand.
+- **Account** (a registry, like hosts) — user/service accounts seen in the
+  case, held in their own registry with domain, SID, type, and a disposition.
+  **Compromised Account** and **Lateral Movement** findings auto-register the
+  account they name and link to it (merge-only, never overwriting), and any
+  finding can be tied to accounts explicitly via an associated-accounts picker
+  (`--accounts` on `vera f`/`vera edit`). The web **Accounts** tab is an
+  inline-editable grid like Hosts; each account's panel lists every finding
+  naming it. Add suspects up front, or let findings populate it.
+- **Lateral Movement** (a finding type) — movement is **directional**, so it
+  carries a **source host → destination host**, the **technique** (WMI, PsExec,
+  RDP, SMB, …), and the **account used**; both endpoints also join the finding's
+  affected-host set. `vera f "…" -t lateral --source-host RD01 --dest-host WS01
+  --technique "explicit creds" --account svc-backup`.
+- **Follow-ups** — any finding can carry a **follow-up checklist** (same
+  machinery as leads): things to chase before the finding is done — "pull
+  prefetch on WKSTN01", "check 4624s on the target". Each item is workable in
+  place (an **Investigate →** button logs a drill-down step + finding and links
+  it back), and the Leads tab shows a case-wide **Open follow-ups** queue.
+  `vera followup add F70 "prefetch on WKSTN01"`; `vera followup` lists what's open.
+- **Attribution** — every action and finding records **who logged it**
+  (`created_by`), shown as a `👤 user` byline on its card and in the Markdown/
+  JSON exports; the per-case audit log records **who** made each later edit.
+  Attribution is stored as the username string inside the case, so it survives
+  export and displays with no user-database lookup. (CLI edits record no user —
+  the CLI is unauthenticated; see *Collaboration*.)
 - **Collection** (`C#`) — a batch/sweep (e.g. a 40-host artifact export) with
   its provenance (tool, operator, scope) and the **hosts it covers**. Evidence
   in a collection sources its hosts from the collection — that's where they're
@@ -173,7 +203,8 @@ original run.
 
 ## Web viewer
 
-`vera serve` opens a local-only viewer (127.0.0.1) with:
+`vera serve` opens the viewer (bound to 127.0.0.1 by default; sign-in required
+once accounts exist — see *Collaboration & access control*) with:
 
 - **Investigation** — the action→finding→action tree; add actions/findings and
   edit anything. Add/edit/clone open in a **modal dialog** (Esc or click-away to
@@ -186,13 +217,17 @@ original run.
   `vera clone F9` from the CLI too.) Affected hosts show the same everywhere — a
   chip with the first few names, "(… and N more)", full list on hover; the ★ on
   any finding/lead toggles the key-finding flag (also a checkbox in the form).
-- **Timeline** — every finding with an event time, in incident order
+- **Timeline** — every finding with an event time, in incident order, with a
+  **date-range filter** (`From` / `To`, date or timestamp) that lives in the URL
+  so a filtered view is shareable.
 - **Stack** — cross-host findings, rarest first (least-frequency triage)
 - **Hosts** — an **inline-editable** registry grid: click any cell, tab between
   fields, changes autosave as you go. The blank row at the bottom adds a host
   (paste a newline/comma list to add many at once); ✕ removes one. Per-host
   finding counts click through to what affects each host. The Status column
   color-codes each row by disposition.
+- **Accounts** — the account registry as an inline-editable grid like Hosts;
+  each account's finding count opens a panel of every finding naming it.
 - **Coverage** — the hosts × analysis matrix: evidence/step/finding counts,
   per-tool step counts, and last-examined time for every host, with unexamined
   hosts highlighted.
@@ -201,12 +236,63 @@ original run.
 - **Leads** — triage worklists (e.g. an LFO sweep): add/check off items, link
   each to the finding that resolved it, track "N of M triaged"
 - **Category tabs** — Compromised Hosts / Accounts, Malware & Tools,
-  Network / Host Indicators, generated automatically from finding types
+  Network / Host Indicators, Lateral Movement, generated automatically from
+  finding types
 - **Evidence** — items and hashes, plus collections/batches
-- **Export .md** button for the replay report
+- header actions — **Export .md** (any signed-in user), **Bundle** (download a
+  chain-of-custody bundle; lead/admin), **Members** (the case roster; lead/admin
+  edit it), and **Admin** (user management + access log; admins only)
 
 Findings carry an **affected-hosts** tag control; a `🖥 N hosts` chip on any
 cross-host finding jumps to the registry.
+
+**Every tab is a real URL** (`/investigation`, `/timeline`, `/evidence`,
+`/accounts`, `/findings/<type>`, …), served so a refresh or a shared link lands
+on the right view. A ref jump is a deep link too: `/investigation?F=13` or
+`?A=24` opens the tree expanded to that node — click a finding's ref anywhere
+(Timeline, a category sheet) and copy the URL straight to a teammate.
+
+## Collaboration & access control
+
+`vera serve` can be a shared, multi-user server. Accounts, roles, and case
+membership gate the **web** UI; the **CLI** is unchanged and unauthenticated (it
+edits case files directly — see the threat-model note below).
+
+- **First run** — with no users yet, the server shows a one-time screen to
+  **create the initial admin**. From then on, signing in is required.
+- **Roles** (global, per user):
+  - **admin** — everything an investigator can do, plus **user management** and
+    full access to every case (an implicit member everywhere);
+  - **investigator** — logs actions/findings, but only on cases they're a
+    **member** of;
+  - **viewer** — read-only across all cases (sees investigations and reports,
+    changes nothing).
+- **Case membership & lead investigator** — each case has exactly one **lead**
+  (the creator becomes lead) plus any number of member investigators. The lead
+  (or an admin) manages the roster from the **Members** panel. A global
+  investigator can only *modify* a case once they've been added to it.
+- **Passwords** — salted and hashed with `scrypt` (stdlib); minimum 12 chars
+  with 3 of 4 character classes, or 16+ of anything (passphrase-friendly), with
+  a common-password blocklist. Sign-in has failed-attempt lockout. Users change
+  their own password from the header; an admin can issue a **one-time reset
+  code** for a forgotten one.
+- **Admin pages** (admins only) — a **Users** view (create/disable, change
+  roles, issue reset codes; the last active admin can't be locked out) and an
+  **Access log** view.
+- **Two audit trails** — each case carries its own append-only **edit log**
+  *inside* the `.vera` (who changed what, part of chain of custody, ships with
+  the case). Separately, a **global access log** (`vera-audit.db`) records
+  server-wide security events — sign-ins, user administration, and every case
+  export — and is **never** part of a case export.
+
+**Threat model.** This is *web-tier* access control: it governs who can do what
+through the browser. Anyone with **filesystem access to a `.vera` file, or the
+CLI on the server box, has full access** — that's inherent to the portable
+single-file design, and the CLI is intentionally auth-free. Team deployments
+should keep case files on the server, have collaborators come in via the web UI,
+and terminate **TLS** at a reverse proxy (passwords over plaintext LAN HTTP
+would undermine the point). Sessions are `HttpOnly` cookies with a CSRF header
+check on writes.
 
 ## Nothing is ever purged
 
@@ -228,6 +314,18 @@ everything that was ever entered.
   disposition), and `CrossHostFindings.csv`.
 - `vera export json` — complete structured dump (hosts, collections, findings
   with their affected-host sets, and attachment manifest).
+- `vera export bundle` — a **chain-of-custody bundle** (`<case>-<date>.bundle.zip`):
+  the `.vera` plus the rendered `md`/`csv`/`json` reports, zipped, SHA-256
+  hashed, and zipped again with a `MANIFEST.json` + human-readable `RECEIPT.txt`
+  so the package is tamper-evident. `--include-evidence DIR` also packs raw
+  evidence files whose recorded hash matches (verifying each; off by default —
+  otherwise evidence is referenced by hash). In the web UI it's the **Bundle**
+  button (lead/admin). Every export is logged to the case's export ledger.
+- `vera verify <bundle>.zip` — recompute every hash against the manifest;
+  reports intact (green) or tampered (red, naming the offending file). Needs no
+  case, no accounts, no network — verification is fully offline.
+
+Markdown and JSON exports include **who logged** each action/finding.
 
 ## Active case
 
@@ -266,9 +364,10 @@ Everything is plain SQLite on disk — no database server to run.
   migration upgrades an older case, so a bad upgrade can never eat the only
   copy. Safe to archive or delete once you've confirmed the upgraded case opens.
 
-So to hand off an investigation, share only the `.vera` file. To move a whole
-**team server**, copy the case directory *including* `vera-users.db` (keep it
-private — it's your credential store).
+So to hand off an investigation, share only the `.vera` file (or a
+`vera export bundle` of it). To move a whole **team server**, copy the case
+directory *including* `vera-users.db` and `vera-audit.db` (keep them private —
+they're your credential store and security log).
 
 ## Development
 

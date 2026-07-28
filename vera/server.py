@@ -13,8 +13,10 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from . import accesslog as alogmod
 from . import auth as authmod
 from . import export, types
+from .accesslog import AccessLog
 from .auth import AuthError, UsersDB
 from .db import Case, CaseError
 
@@ -54,6 +56,7 @@ class Handler(BaseHTTPRequestHandler):
     case_path: str | None = None  # active case; None = show New Investigation screen
     case_dir: str = "."           # where .vera files live and get created
     users_path: str = "vera-users.db"  # global users/sessions DB (not per-case)
+    audit_path: str = "vera-audit.db"  # global access/security log (server-wide)
 
     # -- plumbing -------------------------------------------------------------
 
@@ -101,6 +104,18 @@ class Handler(BaseHTTPRequestHandler):
         """The session's user, or None — without sending any error response."""
         with UsersDB(Handler.users_path) as udb:
             return udb.session_user(self._cookie_token())
+
+    def _alog(self, event: str, who: str = "", who_role: str = "",
+              case_ref: str = "", detail: dict | None = None) -> None:
+        """Append to the global access/security log (best-effort — a logging
+        failure must never break the request it's recording)."""
+        try:
+            ip = self.client_address[0] if self.client_address else ""
+            with AccessLog(Handler.audit_path) as al:
+                al.log(event, who=who, who_role=who_role, case_ref=case_ref,
+                       ip=ip, detail=detail)
+        except Exception:
+            pass
 
     def _require_user(self, *roles: str) -> dict | None:
         """The session's user, or None after sending 401/403."""
@@ -175,6 +190,16 @@ class Handler(BaseHTTPRequestHandler):
                 with UsersDB(Handler.users_path) as udb:
                     self._json(udb.users())
                 return
+            if url.path == "/api/access_log":
+                if user["role"] != "admin":
+                    self._error("admin only", 403)
+                    return
+                q = parse_qs(url.query)
+                limit = min(int((q.get("limit") or ["200"])[0]), 1000)
+                event = (q.get("event") or [""])[0]
+                with AccessLog(Handler.audit_path) as al:
+                    self._json(al.recent(limit=limit, event=event))
+                return
             self._api_get(url)
         except AuthError as exc:
             self._error(str(exc), 403)
@@ -220,7 +245,7 @@ class Handler(BaseHTTPRequestHandler):
                 if user["role"] != "admin":
                     self._error("admin only", 403)
                     return
-                self._users_mutate(method, url, body)
+                self._users_mutate(method, url, body, user)
                 return
             if user["role"] not in ("admin", "investigator"):
                 self._error("viewers have read-only access", 403)
@@ -264,21 +289,34 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("username", ""), "admin",
                     password=body.get("password", ""),
                     display_name=body.get("display_name", ""))
-                self._json_with_cookie(
-                    {"ok": True, "user": udb.get_user(uid)},
-                    udb.create_session(uid))
+                user = udb.get_user(uid)
+                self._alog(alogmod.BOOTSTRAP, who=user["username"],
+                           who_role="admin")
+                self._json_with_cookie({"ok": True, "user": user},
+                                       udb.create_session(uid))
             elif path == "/api/login":
-                user = udb.authenticate(body.get("username", ""),
-                                        body.get("password", ""))
+                username = body.get("username", "")
+                try:
+                    user = udb.authenticate(username, body.get("password", ""))
+                except AuthError:
+                    self._alog(alogmod.LOGIN_FAILED, who=username)
+                    raise
+                self._alog(alogmod.LOGIN, who=user["username"],
+                           who_role=user["role"])
                 self._json_with_cookie({"ok": True, "user": user},
                                        udb.create_session(user["id"]))
             elif path == "/api/logout":
+                who = (self._current_user() or {}).get("username", "")
                 udb.delete_session(self._cookie_token())
+                self._alog(alogmod.LOGOUT, who=who)
                 self._json_with_cookie({"ok": True}, "", clear=True)
             else:  # /api/password: self-service change, or via a reset code
                 if body.get("reset_token"):
-                    udb.reset_password(body["reset_token"],
-                                       body.get("new_password", ""))
+                    uid = udb.reset_password(body["reset_token"],
+                                             body.get("new_password", ""))
+                    self._alog(alogmod.PASSWORD_CHANGE,
+                               who=udb.get_user(uid)["username"],
+                               detail={"via": "reset_code"})
                     self._json({"ok": True})
                     return
                 user = udb.session_user(self._cookie_token())
@@ -288,10 +326,13 @@ class Handler(BaseHTTPRequestHandler):
                 udb.change_password(user["id"],
                                     body.get("current_password", ""),
                                     body.get("new_password", ""))
+                self._alog(alogmod.PASSWORD_CHANGE, who=user["username"],
+                           detail={"via": "self"})
                 self._json({"ok": True})
 
-    def _users_mutate(self, method: str, url, body: dict) -> None:
-        """Admin-only user management."""
+    def _users_mutate(self, method: str, url, body: dict, admin: dict) -> None:
+        """Admin-only user management (`admin` is the acting admin, for logging)."""
+        by = admin["username"]
         with UsersDB(Handler.users_path) as udb:
             if method == "POST" and url.path == "/api/users":
                 # with a password: usable immediately (flagged to rotate it);
@@ -302,19 +343,33 @@ class Handler(BaseHTTPRequestHandler):
                     password=password,
                     display_name=body.get("display_name", ""),
                     must_change=password is not None)
-                out = {"id": uid, "user": udb.get_user(uid)}
+                target = udb.get_user(uid)
+                self._alog(alogmod.USER_CREATE, who=by, who_role="admin",
+                           detail={"user": target["username"],
+                                   "role": target["role"],
+                                   "with_password": password is not None})
+                out = {"id": uid, "user": target}
                 if password is None:
                     out["reset_token"] = udb.create_reset_token(uid)
+                    self._alog(alogmod.RESET_ISSUED, who=by, who_role="admin",
+                               detail={"user": target["username"]})
                 self._json(out, 201)
                 return
             m = re.fullmatch(r"/api/users/(\d+)/reset_token", url.path)
             if m and method == "POST":
+                target = udb.get_user(int(m.group(1)))
                 self._json({"reset_token":
                             udb.create_reset_token(int(m.group(1)))}, 201)
+                self._alog(alogmod.RESET_ISSUED, who=by, who_role="admin",
+                           detail={"user": target["username"]})
                 return
             m = re.fullmatch(r"/api/users/(\d+)", url.path)
             if m and method == "PATCH":
+                target = udb.get_user(int(m.group(1)))
                 udb.update_user(int(m.group(1)), **body)
+                self._alog(alogmod.USER_UPDATE, who=by, who_role="admin",
+                           detail={"user": target["username"],
+                                   "changes": {k: body[k] for k in body}})
                 self._json({"ok": True})
                 return
             self._error("not found", 404)
@@ -699,10 +754,16 @@ class Handler(BaseHTTPRequestHandler):
                             "can export a bundle", 403)
                 return
             with tempfile.TemporaryDirectory() as out:
-                path, _manifest = bundlemod.build_bundle(case, out)
+                path, manifest = bundlemod.build_bundle(case, out)
                 with open(path, "rb") as fh:
                     data = fh.read()
                 fname = os.path.basename(path)
+            # cross-case export ledger (the per-case ledger is written by
+            # build_bundle; this is the server-wide view for the admin)
+            self._alog(alogmod.EXPORT, who=actor, who_role=user["role"],
+                       case_ref=case.meta().get("name", "") or fname,
+                       detail={"kind": "bundle", "file": fname,
+                               "bundle_sha256": manifest["inner_zip"]["sha256"]})
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")
         self.send_header("Content-Length", str(len(data)))
@@ -760,8 +821,10 @@ def serve(case_path: str | None, port: int = 8845, open_browser: bool = True,
     Handler.case_path = os.path.abspath(case_path) if case_path else None
     Handler.case_dir = os.path.abspath(
         case_dir or (os.path.dirname(case_path) if case_path else os.getcwd()))
-    # global users/sessions DB lives beside the case files, never inside one
+    # global users/sessions DB + access log live beside the case files, never
+    # inside one (and never in a case export)
     Handler.users_path = os.path.join(Handler.case_dir, "vera-users.db")
+    Handler.audit_path = os.path.join(Handler.case_dir, "vera-audit.db")
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
     where = case_path or f"New Investigation screen — cases in {Handler.case_dir}"

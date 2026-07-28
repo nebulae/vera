@@ -252,6 +252,12 @@ Everything is plain SQLite on disk — no database server to run.
   any case and spans all of them — **do not share it or commit it**; it holds
   password hashes and is specific to one server install. (git-ignored by
   default.)
+- **`vera-audit.db`** — the global access/security log (sign-ins, user
+  administration, and every case export), beside `vera-users.db` in the case
+  directory. Also **global, server-private, and never part of a case export** —
+  don't share or commit it. View it under Admin → Access log. (git-ignored.)
+  This is distinct from each case's own `audit_log` (the data-edit history that
+  lives *inside* the `.vera` and ships with it).
 - **`<name>.vera-wal` / `<name>.vera-shm`** — SQLite write-ahead-log sidecars,
   created while a case is open so multiple people can read during a write.
   Transient; they fold back into the `.vera` file on a clean close. No need to

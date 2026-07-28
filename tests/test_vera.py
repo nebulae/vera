@@ -961,6 +961,7 @@ def running_server(case, tmp_path):
     from vera.server import Handler
     Handler.case_path = case.path
     Handler.users_path = str(tmp_path / "users.db")
+    Handler.audit_path = str(tmp_path / "audit.db")
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -1059,6 +1060,7 @@ def blank_server(tmp_path, monkeypatch):
     Handler.case_path = None
     Handler.case_dir = str(tmp_path)
     Handler.users_path = str(tmp_path / "users.db")
+    Handler.audit_path = str(tmp_path / "audit.db")
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -1087,6 +1089,48 @@ def test_create_and_open_case_via_api(blank_server):
 
     status, raw = _req(port, "POST", "/api/cases", {"name": ""})
     assert status == 400
+
+
+def test_access_log(tmp_path):
+    from vera.accesslog import AccessLog, LOGIN, EXPORT
+    al = AccessLog(str(tmp_path / "a.db"))
+    al.log(LOGIN, who="trinity", who_role="admin", ip="127.0.0.1")
+    al.log(EXPORT, who="neo", case_ref="SRL",
+           detail={"kind": "bundle", "file": "srl.bundle.zip"})
+    rows = al.recent()
+    assert [r["event"] for r in rows] == ["export", "login"]  # newest first
+    assert rows[0]["detail"]["file"] == "srl.bundle.zip"
+    assert rows[1]["who"] == "trinity"
+    assert [r["event"] for r in al.recent(event="login")] == ["login"]
+
+
+def test_access_log_via_server(running_server, tmp_path):
+    port = running_server  # bootstrap already logged; admin cookie in _SESSION
+    # a failed then successful sign-in, a user creation, and an export all log
+    _login(port, "trinity", "wrong password entirely")   # login_failed
+    _req(port, "POST", "/api/users",
+         {"username": "neo", "role": "investigator",
+          "password": "a solid shared passphrase"})       # user_create
+    _req(port, "POST", "/api/members", {"username": "trinity", "role": "lead"})
+    st, _ = _req(port, "POST", "/api/export/bundle", {})   # export (admin=lead-ok)
+    assert st == 200
+
+    log = json.loads(_req(port, "GET", "/api/access_log")[1])
+    events = [r["event"] for r in log]
+    assert "bootstrap" in events and "login_failed" in events
+    assert "user_create" in events and "export" in events
+    exp = next(r for r in log if r["event"] == "export")
+    assert exp["who"] == "trinity" and exp["detail"]["kind"] == "bundle"
+    fail = next(r for r in log if r["event"] == "login_failed")
+    assert fail["who"] == "trinity"
+
+    # the access log is admin-only
+    _req(port, "POST", "/api/users",
+         {"username": "vw", "role": "viewer",
+          "password": "a solid shared passphrase"})
+    _, _, vw = _login(port, "vw", "a solid shared passphrase")
+    st, _ = _req(port, "GET", "/api/access_log", cookie=vw)
+    assert st == 403
 
 
 def test_admin_user_management(running_server):

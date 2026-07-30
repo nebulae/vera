@@ -23,6 +23,10 @@ pip install -e .        # or: pipx install .
 
 Or run straight from the repo without installing: `python3 -m vera ...`
 
+For **cryptographically signed provenance** (Ed25519 — see *Collaboration*),
+install the optional extra: `pip install "vera[provenance]"`. Without it, export
+bundles are still hash-verified, just unsigned.
+
 ## Quickstart
 
 ```sh
@@ -285,6 +289,32 @@ edits case files directly — see the threat-model note below).
   server-wide security events — sign-ins, user administration, and every case
   export — and is **never** part of a case export.
 
+### Provenance & moving cases between servers
+
+Every record stores **which system** wrote it (`created_by_origin`), not just
+which user — so a case can move between servers without its attribution
+blurring, even if usernames collide.
+
+- **Server identity** — on first run a server gets an identity. With the
+  `provenance` extra that's an **Ed25519 keypair**; its **`server_id` is the
+  public key's fingerprint**, so the id is unforgeable (you can't claim it
+  without the private key, which never leaves the server — a `0600`
+  `vera-server-key.pem`). Give the server a human **label** at bootstrap.
+- **Signed bundles** — `vera export bundle` (web Download / lead-admin) signs
+  the manifest; anyone can `vera verify` it **offline** to prove both integrity
+  *and origin*, with no ability to forge. Without the extra, bundles are
+  hash-verified but unsigned (the receipt says so).
+- **Origin badge** — a record made on a *different* server than the case now
+  lives on is badged `👤 user · from <server>` in the UI, with the originating
+  `server_id` on hover. Same username, different origin = unmistakably distinct.
+- **Import & adopt** — `vera import <bundle>.zip` verifies and extracts the
+  `.vera`. An imported case's home server isn't yours, so its **membership is
+  inert** (no investigator inherits access by a name match) until an **admin
+  adopts** it (an *Adopt to this server* banner, or `POST /api/adopt`): that
+  stamps the case's home to your server and resets the roster (the adopter
+  becomes lead). **Attribution and history are never rewritten** — only the
+  access-granting roster resets.
+
 **Threat model.** This is *web-tier* access control: it governs who can do what
 through the browser. Anyone with **filesystem access to a `.vera` file, or the
 CLI on the server box, has full access** — that's inherent to the portable
@@ -322,8 +352,12 @@ everything that was ever entered.
   otherwise evidence is referenced by hash). In the web UI it's the **Bundle**
   button (lead/admin). Every export is logged to the case's export ledger.
 - `vera verify <bundle>.zip` — recompute every hash against the manifest;
-  reports intact (green) or tampered (red, naming the offending file). Needs no
-  case, no accounts, no network — verification is fully offline.
+  reports intact (green) or tampered (red, naming the offending file). With the
+  `provenance` extra it also checks the **signature** and reports which server
+  sealed it. Needs no case, no accounts, no network — verification is fully
+  offline.
+- `vera import <bundle>.zip` — verify a bundle and extract its `.vera` (refuses
+  a tampered bundle). See *moving cases between servers* below.
 
 Markdown and JSON exports include **who logged** each action/finding.
 
@@ -356,6 +390,11 @@ Everything is plain SQLite on disk — no database server to run.
   don't share or commit it. View it under Admin → Access log. (git-ignored.)
   This is distinct from each case's own `audit_log` (the data-edit history that
   lives *inside* the `.vera` and ships with it).
+- **`vera-server-key.pem`** — the server's Ed25519 **private key** (only with
+  the `provenance` extra), beside `vera-users.db`, `0600`. It signs export
+  bundles and *is* this server's provenance identity. **Never share or commit
+  it** — losing it means you can no longer sign as this server; leaking it lets
+  someone forge your seal. (git-ignored.)
 - **`<name>.vera-wal` / `<name>.vera-shm`** — SQLite write-ahead-log sidecars,
   created while a case is open so multiple people can read during a write.
   Transient; they fold back into the `.vera` file on a clean close. No need to

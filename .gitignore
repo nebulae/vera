@@ -8,3 +8,4 @@ vera-users.db
 vera-users.db-*
 vera-audit.db
 vera-audit.db-*
+vera-server-key.pem

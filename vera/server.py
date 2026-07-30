@@ -89,7 +89,18 @@ class Handler(BaseHTTPRequestHandler):
     def _case(self, actor: str = "") -> Case:
         if not self.case_path:
             raise CaseError("no active investigation — create or open one first")
-        return Case(self.case_path, actor=actor)
+        oid, olabel = self._server_origin()
+        return Case(self.case_path, actor=actor,
+                    origin_id=oid, origin_label=olabel)
+
+    def _server_origin(self) -> tuple[str, str]:
+        """This server's (id, label) for stamping origin on writes."""
+        try:
+            with UsersDB(Handler.users_path) as udb:
+                ident = udb.server_identity()
+            return (ident["server_id"], ident["label"]) if ident else ("", "")
+        except Exception:
+            return "", ""
 
     # -- auth plumbing --------------------------------------------------------
 
@@ -258,11 +269,34 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/export/bundle":
                 self._export_bundle(user)
                 return
+            # adopting an imported case rebinds it to this server — admin only
+            if url.path == "/api/adopt":
+                if user["role"] != "admin":
+                    self._error("only an admin can adopt an imported case", 403)
+                    return
+                oid, olabel = self._server_origin()
+                with self._case(user["username"]) as case:
+                    case.adopt(oid, olabel, user["username"])
+                self._alog(alogmod.USER_UPDATE, who=user["username"],
+                           who_role="admin",
+                           detail={"action": "adopt_case"})
+                self._json({"ok": True})
+                return
             # investigators may only modify cases they belong to; admins may
             # modify any case (implicit member everywhere). Case creation is
             # exempt — there's no case to be a member of yet.
             if user["role"] == "investigator" and url.path != "/api/cases":
+                oid, _ = self._server_origin()
                 with self._case() as case:
+                    home = case.home_server()
+                    # a case whose home server isn't this one is imported and
+                    # not yet adopted — its (foreign) membership is inert, so no
+                    # investigator inherits access by a username match
+                    if home and oid and home != oid:
+                        self._error("this case was imported from another server "
+                                    "and hasn't been adopted here — an admin "
+                                    "must adopt it first", 403)
+                        return
                     if case.member_role(user["username"]) is None:
                         self._error("you are not a member of this case — ask "
                                     "its lead investigator to add you", 403)
@@ -290,6 +324,9 @@ class Handler(BaseHTTPRequestHandler):
                     password=body.get("password", ""),
                     display_name=body.get("display_name", ""))
                 user = udb.get_user(uid)
+                # establish this server's provenance identity (Ed25519 keypair
+                # if the provenance extra is installed, else a random id)
+                udb.ensure_identity(label=body.get("server_label", ""))
                 self._alog(alogmod.BOOTSTRAP, who=user["username"],
                            who_role="admin")
                 self._json_with_cookie({"ok": True, "user": user},
@@ -401,6 +438,8 @@ class Handler(BaseHTTPRequestHandler):
         with self._case() as case:
             if url.path == "/api/case":
                 me = self._current_user()
+                oid, olabel = self._server_origin()
+                home = case.home_server()
                 self._json({"active": True, "meta": case.meta(),
                             "evidence": case.evidence(), "counts": case.counts(),
                             "hosts": case.hosts(), "collections": case.collections(),
@@ -408,6 +447,12 @@ class Handler(BaseHTTPRequestHandler):
                             "members": case.members(),
                             "my_case_role": (case.member_role(me["username"])
                                              if me else None),
+                            # provenance: this server's id, the case's home, and
+                            # every origin's label — for the foreign-origin badge
+                            "server_id": oid, "server_label": olabel,
+                            "home_server": home,
+                            "is_foreign": bool(home and oid and home != oid),
+                            "origins": case.origins(),
                             "file": os.path.basename(case.path),
                             "tools": case.tool_suggestions(),
                             "types": _types_payload()})
@@ -733,9 +778,13 @@ class Handler(BaseHTTPRequestHandler):
         while os.path.exists(path):
             path = os.path.join(Handler.case_dir, f"{base}-{n}.vera")
             n += 1
-        with Case(path, create=True, actor=actor) as c:
+        oid, olabel = self._server_origin()
+        with Case(path, create=True, actor=actor,
+                  origin_id=oid, origin_label=olabel) as c:
             c.set_meta(name=name, investigator=body.get("investigator", ""))
-            # the creator becomes the case's lead investigator
+            # this server owns the new case (home_server); the creator is lead
+            if oid:
+                c.set_home_server(oid, olabel)
             if actor:
                 c.add_member(actor, role="lead", added_by=actor)
         Handler.case_path = path
@@ -753,8 +802,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._error("only the case's lead investigator or an admin "
                             "can export a bundle", 403)
                 return
+            with UsersDB(Handler.users_path) as udb:
+                signer = udb.load_signer()
             with tempfile.TemporaryDirectory() as out:
-                path, manifest = bundlemod.build_bundle(case, out)
+                path, manifest = bundlemod.build_bundle(case, out, signer=signer)
                 with open(path, "rb") as fh:
                     data = fh.read()
                 fname = os.path.basename(path)
@@ -763,6 +814,7 @@ class Handler(BaseHTTPRequestHandler):
             self._alog(alogmod.EXPORT, who=actor, who_role=user["role"],
                        case_ref=case.meta().get("name", "") or fname,
                        detail={"kind": "bundle", "file": fname,
+                               "signed": manifest["signed"],
                                "bundle_sha256": manifest["inner_zip"]["sha256"]})
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")

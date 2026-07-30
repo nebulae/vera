@@ -98,6 +98,97 @@ def test_manual_step(case):
         case.add_action(method="command")  # empty command
 
 
+def test_signing_and_signed_bundle(case, tmp_path):
+    from vera import signing, bundle
+    if not signing.available():
+        pytest.skip("provenance extra (cryptography) not installed")
+    priv, pub = signing.generate_keypair()
+    sid = signing.fingerprint(pub)
+    # the id is the fingerprint of the public key
+    assert signing.fingerprint(pub) == sid and len(sid) == 32
+    signer = signing.Signer(sid, "Stark Research Labs", pub, priv)
+
+    build_sample(case)
+    path, manifest = bundle.build_bundle(case, str(tmp_path / "out"),
+                                         signer=signer)
+    assert manifest["signed"] is True
+    assert manifest["signature"]["server_id"] == sid
+
+    res = bundle.verify_bundle(path)
+    assert res["ok"] and res["signature"]["ok"]
+    assert res["signature"]["fingerprint_ok"] and res["signature"]["signature_ok"]
+
+    # forge the server_id (claim a trusted id on a different key) -> fails,
+    # because the id must be the fingerprint of the key that actually signed
+    with zipfile.ZipFile(path) as zf:
+        e = {n: zf.read(n) for n in zf.namelist()}
+    m = json.loads(e["MANIFEST.json"])
+    m["signature"]["server_id"] = "0" * 32
+    e["MANIFEST.json"] = json.dumps(m, indent=2).encode()
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for n, d in e.items():
+            zf.writestr(n, d)
+    res2 = bundle.verify_bundle(path)
+    assert res2["ok"] is False and res2["signature"]["fingerprint_ok"] is False
+
+
+def test_provenance_origin_and_adopt(tmp_path):
+    from vera.db import Case
+    p = str(tmp_path / "prov.vera")
+    # created on "server A"
+    c = Case(p, create=True, actor="neo", origin_id="serverA",
+             origin_label="Server A")
+    c.set_meta(name="P")
+    c.set_home_server("serverA", "Server A")
+    c.add_member("neo", role="lead", added_by="neo")
+    a = c.add_action(command="nmap")
+    f = c.add_finding("open port", action_id=a)
+    assert c.get_action(a)["created_by_origin"] == "serverA"
+    assert c.get_finding(f)["created_by_origin"] == "serverA"
+    assert c.origins() == {"serverA": "Server A"}
+    assert c.home_server() == "serverA"
+    c.close()
+
+    # re-opened on "server B" (post-import); a new record carries B's origin,
+    # and B now appears in the case's origin map — but home is still A (foreign)
+    c2 = Case(p, actor="trinity", origin_id="serverB", origin_label="Server B")
+    a2 = c2.add_action(command="local check")
+    assert c2.get_action(a2)["created_by_origin"] == "serverB"
+    assert set(c2.origins()) == {"serverA", "serverB"}
+    assert c2.home_server() == "serverA"
+
+    # adopt onto B: home flips, foreign roster clears, adopter becomes lead,
+    # but attribution/origin history is untouched
+    c2.adopt("serverB", "Server B", "trinity")
+    assert c2.home_server() == "serverB"
+    assert c2.member_role("neo") is None          # foreign member dropped
+    assert c2.member_role("trinity") == "lead"
+    assert c2.get_action(a)["created_by_origin"] == "serverA"  # history intact
+    c2.close()
+
+
+def test_bundle_import_extract(case, tmp_path):
+    from vera import bundle
+    from vera.db import Case, CaseError
+    build_sample(case)
+    path, _ = bundle.build_bundle(case, str(tmp_path / "out"))
+    dest, res = bundle.extract_case(path, str(tmp_path / "imported"))
+    assert os.path.exists(dest) and res["ok"]
+    # the extracted file is a real, openable case with the same data
+    with Case(dest) as c2:
+        assert c2.counts()["findings"] == case.counts()["findings"]
+    # a tampered bundle refuses to import
+    with zipfile.ZipFile(path) as zf:
+        e = {n: zf.read(n) for n in zf.namelist()}
+    inner = next(n for n in e if n.endswith(".inner.zip"))
+    b = bytearray(e[inner]); b[-8] ^= 1; e[inner] = bytes(b)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for n, d in e.items():
+            zf.writestr(n, d)
+    with pytest.raises(CaseError):
+        bundle.extract_case(path, str(tmp_path / "imported2"))
+
+
 def test_export_bundle_roundtrip(case, tmp_path):
     from vera import bundle
     build_sample(case)

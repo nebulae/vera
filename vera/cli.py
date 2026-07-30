@@ -1064,13 +1064,27 @@ def cmd_export(args) -> int:
     with open_case(args) as case:
         if args.format == "bundle":
             from . import bundle
+            # sign if the case's directory has a server identity + the
+            # provenance extra (same identity the web server uses)
+            signer = None
+            users_db = os.path.join(os.path.dirname(case.path), "vera-users.db")
+            if os.path.exists(users_db):
+                from .auth import UsersDB
+                with UsersDB(users_db) as udb:
+                    signer = udb.load_signer()
             path, manifest = bundle.build_bundle(
                 case, args.out,
-                include_evidence_dir=getattr(args, "include_evidence", None))
+                include_evidence_dir=getattr(args, "include_evidence", None),
+                signer=signer)
             print(f"wrote {path}")
             print(f"  sha256 {bundle._sha256_file(path)}")
             print(f"  inner  {manifest['inner_zip']['sha256']}")
-            print("  (unsigned — integrity only)")
+            if manifest["signed"]:
+                sb = manifest["signature"]
+                print(f"  signed by {sb['server_label'] or sb['server_id']} "
+                      f"({sb['server_id']})")
+            else:
+                print("  (unsigned — integrity only)")
             return 0
         # a plain export is still an event worth recording in the case ledger
         written = export.export(case, args.format, args.out)
@@ -1090,14 +1104,36 @@ def cmd_verify(args) -> int:
     for chk in res["checks"]:
         mark = c("2", "✓") if chk["ok"] else c("1", "✗")
         print(f"  {mark} {chk['name']}")
+    sig = res.get("signature")
+    if sig and sig.get("ok"):
+        who = sig.get("server_label") or sig.get("server_id")
+        print(c("2", f"  ✓ signature valid — sealed by {who} ({sig['server_id']})"))
+    elif sig and sig.get("ok") is None:
+        print(c("3", f"  ~ signed by {sig.get('server_id','')} — "
+                     "install vera[provenance] to verify the signature"))
     if res["ok"]:
-        print(c("2", "OK — every hash matches the manifest.")
-              + ("" if res["signed"] else "  (unsigned — integrity only)"))
+        tail = ("" if res["signed"] else "  (unsigned — integrity only)")
+        print(c("2", "OK — every hash matches the manifest.") + tail)
         return 0
     for p in res["problems"]:
         print(c("1", f"  ! {p}"))
     print(c("1", "TAMPERED — the bundle does not match its manifest."))
     return 1
+
+
+def cmd_import(args) -> int:
+    from . import bundle
+    dest, res = bundle.extract_case(args.bundle, args.out)
+    print(c("2", f"verified — extracted case to {dest}"))
+    m = res["manifest"]
+    print(f"  case: {m.get('case_name','')}  from {m.get('exported_by','')}"
+          f" @ {m.get('exported_at','')}")
+    if res.get("signature", {}).get("ok"):
+        s = res["signature"]
+        print(c("2", f"  signed by {s.get('server_label') or s['server_id']}"))
+    print("  Open it with 'vera use', or in the web UI adopt it to this server "
+          "(admin) to re-establish membership.")
+    return 0
 
 
 def cmd_serve(args) -> int:
@@ -1485,6 +1521,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="verify a case export bundle against its manifest")
     p.add_argument("bundle", help="path to a <case>-<date>.bundle.zip")
     p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("import",
+                       help="verify a bundle and extract its .vera case file")
+    p.add_argument("bundle", help="path to a <case>-<date>.bundle.zip")
+    p.add_argument("--out", metavar="DIR", default=".",
+                   help="where to write the extracted case (default: current)")
+    p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("serve", help="open the web viewer")
     p.add_argument("--port", type=int, default=8845)

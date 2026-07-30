@@ -111,10 +111,20 @@ async function boot() {
 // "by <user>" attribution chip for an action/finding (created_by). Empty for
 // pre-collaboration records (created_by == ''); links to the display name if
 // the user is still known.
-function byline(createdBy) {
+function byline(createdBy, origin) {
   if (!createdBy) return null;
-  return el("span", { class: "meta byline", title: `logged by ${createdBy}` },
-    `👤 ${createdBy}`);
+  const info = state.info || {};
+  // a record made on a DIFFERENT server than the case now lives on is
+  // foreign/original-system — badge it distinctly, with the origin id on hover
+  const foreign = origin && info.home_server && origin !== info.home_server;
+  if (!foreign) {
+    return el("span", { class: "meta byline", title: `logged by ${createdBy}` },
+      `👤 ${createdBy}`);
+  }
+  const label = (info.origins && info.origins[origin]) || origin;
+  return el("span", { class: "meta byline foreign-origin",
+    title: `logged by ${createdBy} on ${label} (server ${origin})` },
+    `👤 ${createdBy} · from ${label}`);
 }
 
 function ensureSwitchButton() {
@@ -935,6 +945,32 @@ async function render() {
   } catch (err) {
     view.replaceChildren(el("div", { class: "form-error" }, String(err.message || err)));
   }
+  if (state.info && state.info.is_foreign) view.prepend(foreignBanner());
+}
+
+// shown on an imported case whose home server isn't this one: membership is
+// inert until an admin adopts it, attribution shows the original system
+function foreignBanner() {
+  const info = state.info;
+  const homeLabel = (info.origins && info.origins[info.home_server])
+    || info.home_server || "another server";
+  const banner = el("div", { class: "import-banner" },
+    el("b", {}, "Imported case. "),
+    `This case's home server is ${homeLabel}, so its member roster is inactive `
+    + "here and the bylines show the original system. ");
+  if (state.user && state.user.role === "admin") {
+    banner.append(el("button", { class: "btn small primary", onclick: async () => {
+      if (!confirm("Adopt this case onto this server?\n\nThis resets the member "
+        + "roster (you become lead). Attribution and history are unchanged.")) return;
+      try {
+        await api("/api/adopt", { method: "POST", body: {} });
+        await boot();
+      } catch (e) { alert("adopt failed: " + (e.message || e)); }
+    } }, "Adopt to this server"));
+  } else {
+    banner.append(el("span", { class: "meta" }, "An admin can adopt it."));
+  }
+  return banner;
 }
 
 function emptyState(view, title, hint) {
@@ -2338,7 +2374,7 @@ function actionCard(a) {
       `🔎 ${nFind}`) : null,
     a.exit_code !== null && a.exit_code !== undefined && a.exit_code !== 0
       ? el("span", { class: "meta", style: "color: var(--danger)" }, `exit ${a.exit_code}`) : null,
-    byline(a.created_by),
+    byline(a.created_by, a.created_by_origin),
     el("span", { class: "meta node-time" }, a.performed_at));
   card.append(head);
   if (collapsed) {
@@ -2459,7 +2495,7 @@ function findingCard(f) {
       `↳ ${nAct}`) : null,
     leadProgress,
     fuChip,
-    byline(f.created_by),
+    byline(f.created_by, f.created_by_origin),
     f.event_time ? el("span", { class: "meta node-time" }, timeWithKind(f)) : null));
   if (collapsed) return card;
 

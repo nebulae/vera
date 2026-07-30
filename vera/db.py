@@ -11,7 +11,7 @@ import sqlite3
 
 from . import types
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 OUTPUT_CAP = 256 * 1024        # chars of captured command output stored per action
 ATTACHMENT_CAP = 25 * 1024 * 1024  # max bytes per stored attachment
 
@@ -95,6 +95,7 @@ CREATE TABLE actions (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     performed_at      TEXT NOT NULL,
     created_by        TEXT NOT NULL DEFAULT '',
+    created_by_origin TEXT NOT NULL DEFAULT '',   -- server_id where it was logged
     host              TEXT NOT NULL DEFAULT '',
     evidence_id       INTEGER REFERENCES evidence(id),
     collection_id     INTEGER REFERENCES collections(id),
@@ -114,6 +115,7 @@ CREATE TABLE findings (
     action_id   INTEGER REFERENCES actions(id),
     evidence_id INTEGER REFERENCES evidence(id),
     created_by  TEXT NOT NULL DEFAULT '',
+    created_by_origin TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     event_time TEXT NOT NULL DEFAULT '',
     time_kind  TEXT NOT NULL DEFAULT '',
@@ -179,6 +181,7 @@ CREATE TABLE audit_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     at         TEXT NOT NULL,
     who        TEXT NOT NULL DEFAULT '',      -- acting username ('' = unknown/CLI)
+    who_origin TEXT NOT NULL DEFAULT '',      -- server_id where the edit happened
     table_name TEXT NOT NULL,
     row_id     INTEGER NOT NULL,
     op         TEXT NOT NULL,                 -- update | soft_delete
@@ -199,6 +202,11 @@ CREATE TABLE exports (
     bundle_sha256 TEXT NOT NULL DEFAULT '',   -- hash of the outer bundle
     include_evidence INTEGER NOT NULL DEFAULT 0,
     manifest      TEXT NOT NULL DEFAULT '{}'  -- the full manifest, as recorded
+);
+CREATE TABLE origins (
+    server_id  TEXT PRIMARY KEY,             -- a system that wrote to this case
+    label      TEXT NOT NULL DEFAULT '',      -- its human label, snapshotted
+    first_seen TEXT NOT NULL
 );
 CREATE INDEX idx_audit_row ON audit_log(table_name, row_id);
 CREATE INDEX idx_leaditems_lead  ON lead_items(lead_id);
@@ -617,12 +625,35 @@ def _migrate_v18(conn: sqlite3.Connection) -> None:
         )""")
 
 
+def _migrate_v19(conn: sqlite3.Connection) -> None:
+    """v18 -> v19: provenance origin — which SYSTEM (not just which user) wrote
+    each record, so an imported case's original-system actions stay
+    distinguishable from local ones after a username could collide. Legacy rows
+    keep created_by_origin='' (unknown origin)."""
+    for tbl in ("actions", "findings"):
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({tbl})")}
+        if "created_by_origin" not in cols:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN "
+                         "created_by_origin TEXT NOT NULL DEFAULT ''")
+    acols = {r[1] for r in conn.execute("PRAGMA table_info(audit_log)")}
+    if "who_origin" not in acols:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN "
+                     "who_origin TEXT NOT NULL DEFAULT ''")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS origins (
+            server_id  TEXT PRIMARY KEY,
+            label      TEXT NOT NULL DEFAULT '',
+            first_seen TEXT NOT NULL
+        )""")
+
+
 # Applied in ascending order to bring a case up to SCHEMA_VERSION.
 MIGRATIONS = {2: _migrate_v2, 3: _migrate_v3, 4: _migrate_v4, 5: _migrate_v5,
               6: _migrate_v6, 7: _migrate_v7, 8: _migrate_v8, 9: _migrate_v9,
               10: _migrate_v10, 11: _migrate_v11, 12: _migrate_v12,
               13: _migrate_v13, 14: _migrate_v14, 15: _migrate_v15,
-              16: _migrate_v16, 17: _migrate_v17, 18: _migrate_v18}
+              16: _migrate_v16, 17: _migrate_v17, 18: _migrate_v18,
+              19: _migrate_v19}
 
 
 class CaseError(Exception):
@@ -674,11 +705,16 @@ def normalize_hashes(hashes: dict | None) -> dict:
 class Case:
     """A single investigation file. Thin wrapper over sqlite3."""
 
-    def __init__(self, path: str, create: bool = False, actor: str = ""):
+    def __init__(self, path: str, create: bool = False, actor: str = "",
+                 origin_id: str = "", origin_label: str = ""):
         self.path = os.path.abspath(path)
         # who is acting through this connection — stamped onto created_by and
         # the audit log. '' = unknown (a direct CLI edit).
         self.actor = actor
+        # WHICH SYSTEM is acting — stamped onto created_by_origin so records
+        # stay attributable to their originating server after import.
+        self.origin_id = origin_id
+        self.origin_label = origin_label
         exists = os.path.exists(self.path)
         if not exists and not create:
             raise CaseError(f"case file not found: {path}")
@@ -953,14 +989,17 @@ class Case:
         truncated = len(output) > OUTPUT_CAP
         digest = sha256_text(output) if output else ""
         default_tool = command.split()[0] if (method == "command" and command) else ""
+        self._record_origin()
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO actions(performed_at, created_by, host, evidence_id,"
+                "INSERT INTO actions(performed_at, created_by, created_by_origin,"
+                " host, evidence_id,"
                 " collection_id, tool, method, command, procedure, output,"
                 " output_sha256, output_truncated, exit_code, notes,"
                 " parent_finding_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (performed_at or _now(), self.actor, host, evidence_id,
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (performed_at or _now(), self.actor, self.origin_id, host,
+                 evidence_id,
                  collection_id, tool or default_tool, method, command,
                  procedure, output[:OUTPUT_CAP], digest, int(truncated),
                  exit_code, notes, parent_finding_id))
@@ -1022,15 +1061,16 @@ class Case:
             self._require("evidence", evidence_id, "E")
         clean_hashes = normalize_hashes(hashes)
         attrs = self._normalize_finding_attrs(ftype, attrs)
+        self._record_origin()
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO findings(action_id, evidence_id, created_by,"
-                " created_at, event_time, time_kind, title, detail, ftype,"
-                " host, attrs, hashes, starred)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (action_id, evidence_id, self.actor, _now(), event_time,
-                 time_kind, title, detail, ftype, host, json.dumps(attrs),
-                 json.dumps(clean_hashes), int(starred)))
+                " created_by_origin, created_at, event_time, time_kind, title,"
+                " detail, ftype, host, attrs, hashes, starred)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (action_id, evidence_id, self.actor, self.origin_id, _now(),
+                 event_time, time_kind, title, detail, ftype, host,
+                 json.dumps(attrs), json.dumps(clean_hashes), int(starred)))
             fid = cur.lastrowid
         if host_ids:
             self.set_finding_hosts(fid, host_ids, audit=False)
@@ -1171,11 +1211,58 @@ class Case:
         is append-only: nothing in vera ever updates or deletes its rows."""
         if op == "update" and not changes:
             return
+        self._record_origin()
         self.conn.execute(
-            "INSERT INTO audit_log(at, who, table_name, row_id, op, changes)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (_now(), self.actor, table, row_id, op,
+            "INSERT INTO audit_log(at, who, who_origin, table_name, row_id, op,"
+            " changes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (_now(), self.actor, self.origin_id, table, row_id, op,
              json.dumps(changes, default=str)))
+
+    def _record_origin(self) -> None:
+        """Snapshot the acting server's id→label into the case, so origins can
+        be displayed later with no external lookup (portable)."""
+        if not self.origin_id:
+            return
+        self.conn.execute(
+            "INSERT INTO origins(server_id, label, first_seen) VALUES (?, ?, ?)"
+            " ON CONFLICT(server_id) DO UPDATE SET"
+            " label = CASE WHEN excluded.label != '' THEN excluded.label"
+            " ELSE origins.label END",
+            (self.origin_id, self.origin_label, _now()))
+
+    def origins(self) -> dict[str, str]:
+        """{server_id: label} for every system that has written to this case."""
+        return {r["server_id"]: r["label"] for r in
+                self.conn.execute("SELECT server_id, label FROM origins")}
+
+    def home_server(self) -> str:
+        """The server_id that currently owns this case (set on creation and on
+        adopt/import). '' for legacy cases created before provenance."""
+        return self.meta().get("home_server", "")
+
+    def set_home_server(self, server_id: str, label: str = "") -> None:
+        self.set_meta(home_server=server_id)
+        if server_id and label:
+            self._record_origin_for(server_id, label)
+
+    def adopt(self, server_id: str, label: str, lead: str) -> None:
+        """Take ownership of an imported case on THIS server: stamp home_server
+        to the local id, drop the foreign roster, and install the adopting
+        admin as lead. Attribution/origin history is untouched (it's the record
+        of what happened elsewhere) — only the access-granting roster resets."""
+        with self.conn:
+            self.conn.execute("DELETE FROM case_members")
+        self.set_home_server(server_id, label)
+        if lead:
+            self.add_member(lead, role="lead", added_by=lead)
+
+    def _record_origin_for(self, server_id: str, label: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO origins(server_id, label, first_seen)"
+                " VALUES (?, ?, ?) ON CONFLICT(server_id) DO UPDATE SET"
+                " label = CASE WHEN excluded.label != '' THEN excluded.label"
+                " ELSE origins.label END", (server_id, label, _now()))
 
     def _update(self, table: str, allowed: set, row_id: int,
                 fields: dict, prefix: str) -> None:

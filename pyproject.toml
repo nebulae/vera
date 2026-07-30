@@ -10,7 +10,10 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest"]
+# signed, cryptographically-verifiable provenance (Ed25519). Core vera stays
+# stdlib-only; without this extra, bundles are hash-verified but unsigned.
+provenance = ["cryptography>=41"]
+dev = ["pytest", "cryptography>=41"]
 
 [project.scripts]
 vera = "vera.cli:main"

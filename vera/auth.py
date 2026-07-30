@@ -14,9 +14,12 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import hmac
+import os
 import re
 import secrets
 import sqlite3
+
+from . import signing
 
 ROLES = ("admin", "investigator", "viewer")
 
@@ -82,7 +85,16 @@ CREATE TABLE IF NOT EXISTS reset_tokens (
     expires_at TEXT NOT NULL,
     used_at    TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS server_identity (
+    server_id   TEXT NOT NULL,       -- fingerprint of the public key (or random)
+    label       TEXT NOT NULL DEFAULT '',
+    public_key  TEXT NOT NULL DEFAULT '',
+    signed      INTEGER NOT NULL DEFAULT 0,   -- 1 = a keypair backs this identity
+    created_at  TEXT NOT NULL
+);
 """
+
+SERVER_KEY_FILE = "vera-server-key.pem"   # private key, kept beside the users DB
 
 
 class AuthError(Exception):
@@ -402,3 +414,58 @@ class UsersDB:
         self.consume_reset_token(token)
         self.set_password(row["user_id"], new_password)
         return row["user_id"]
+
+    # -- server identity (provenance) ---------------------------------------
+    # The server's stable, unforgeable identity. When the provenance extra is
+    # installed this is an Ed25519 keypair (server_id = public-key fingerprint,
+    # private key in a 0600 file beside this DB); otherwise a random id that
+    # serves as a differentiator only.
+
+    def server_identity(self) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM server_identity LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def ensure_identity(self, label: str = "", key_dir: str = "") -> dict:
+        existing = self.server_identity()
+        if existing:
+            return existing
+        key_dir = key_dir or os.path.dirname(os.path.abspath(self.path))
+        if signing.available():
+            priv_pem, pub_pem = signing.generate_keypair()
+            server_id = signing.fingerprint(pub_pem)
+            key_path = os.path.join(key_dir, SERVER_KEY_FILE)
+            # write the private key locked down (0600), owner-only
+            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(priv_pem)
+            signed = 1
+        else:
+            server_id = secrets.token_hex(16)
+            pub_pem = ""
+            signed = 0
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO server_identity(server_id, label, public_key,"
+                " signed, created_at) VALUES (?, ?, ?, ?, ?)",
+                (server_id, label, pub_pem, signed, _now()))
+        return self.server_identity()
+
+    def set_server_label(self, label: str) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE server_identity SET label = ?",
+                              (label,))
+
+    def load_signer(self, key_dir: str = ""):
+        """A Signer for this identity, or None (unsigned mode / no key file)."""
+        ident = self.server_identity()
+        if not ident or not ident["signed"] or not signing.available():
+            return None
+        key_dir = key_dir or os.path.dirname(os.path.abspath(self.path))
+        key_path = os.path.join(key_dir, SERVER_KEY_FILE)
+        if not os.path.exists(key_path):
+            return None
+        with open(key_path) as fh:
+            priv_pem = fh.read()
+        return signing.Signer(ident["server_id"], ident["label"],
+                              ident["public_key"], priv_pem)

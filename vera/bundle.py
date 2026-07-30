@@ -94,10 +94,19 @@ def _gather_evidence(case: Case, src_dir: str, dest_dir: str) -> list[dict]:
     return status
 
 
+def _signable(manifest: dict) -> dict:
+    """The part of the manifest that a signature covers — everything except the
+    signature fields themselves. Reconstructed identically at verify time."""
+    return {k: v for k, v in manifest.items()
+            if k not in ("signed", "signature")}
+
+
 def build_bundle(case: Case, out_dir: str,
-                 include_evidence_dir: str | None = None) -> tuple[str, dict]:
+                 include_evidence_dir: str | None = None,
+                 signer=None) -> tuple[str, dict]:
     """Build a chain-of-custody bundle for `case`. Returns (bundle_path,
-    manifest). Appends an export record to the LIVE case afterwards."""
+    manifest). If `signer` is given, the manifest is Ed25519-signed. Appends an
+    export record to the LIVE case afterwards."""
     from . import __version__
     os.makedirs(out_dir, exist_ok=True)
     case.checkpoint()  # fold WAL so the copied .vera is complete
@@ -149,10 +158,13 @@ def build_bundle(case: Case, out_dir: str,
             "evidence_status": evidence_status,
             "inner_zip": {"name": inner_name, "sha256": inner_sha},
             "files": file_hashes,
-            # populated by the signing phase; unsigned bundles say so plainly
+            # signed below when a signer is supplied; unsigned bundles say so
             "signed": False,
             "signature": None,
         }
+        if signer is not None:
+            manifest["signature"] = signer.signature_block(_signable(manifest))
+            manifest["signed"] = True
         manifest_bytes = json.dumps(manifest, indent=2).encode()
         receipt = _receipt_text(manifest)
 
@@ -242,5 +254,40 @@ def verify_bundle(bundle_path: str) -> dict:
                                        "expected": f["sha256"], "actual": a})
                         if not ok:
                             problems.append(f"payload file altered: {f['name']}")
+    # signature (origin proof) — only when the bundle claims to be signed
+    signature = None
+    if manifest.get("signed"):
+        from . import signing
+        block = manifest.get("signature") or {}
+        if not signing.available():
+            signature = {"ok": None, "server_id": block.get("server_id", ""),
+                         "server_label": block.get("server_label", ""),
+                         "note": "install vera[provenance] to verify signatures"}
+        else:
+            signature = signing.verify_signature_block(block, _signable(manifest))
+            if not signature["ok"]:
+                problems.append("signature does not verify (origin unproven)")
     return {"ok": not problems, "signed": bool(manifest.get("signed")),
-            "manifest": manifest, "checks": checks, "problems": problems}
+            "signature": signature, "manifest": manifest,
+            "checks": checks, "problems": problems}
+
+
+def extract_case(bundle_path: str, out_dir: str) -> tuple[str, dict]:
+    """Verify a bundle and extract its `.vera` into `out_dir`. Returns
+    (vera_path, verify_result). Refuses to extract a tampered bundle."""
+    res = verify_bundle(bundle_path)
+    if not res["ok"]:
+        raise CaseError("refusing to import a bundle that fails verification: "
+                        + "; ".join(res["problems"]))
+    os.makedirs(out_dir, exist_ok=True)
+    case_file = res["manifest"].get("case_file", "case.vera")
+    with zipfile.ZipFile(bundle_path) as zf:
+        inner_name = res["manifest"]["inner_zip"]["name"]
+        with zipfile.ZipFile(io.BytesIO(zf.read(inner_name))) as inz:
+            data = inz.read(case_file)
+    dest = os.path.join(out_dir, os.path.basename(case_file))
+    if os.path.exists(dest):
+        raise CaseError(f"{dest} already exists — move it aside first")
+    with open(dest, "wb") as fh:
+        fh.write(data)
+    return dest, res

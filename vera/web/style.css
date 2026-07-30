@@ -1033,6 +1033,17 @@ table.art-members { margin-top: 4px; }
   padding: 14px; margin: 10px 0; user-select: all; word-break: break-all;
   background: var(--code-bg); border: 1px dashed var(--line); border-radius: 8px;
 }
+.byline.foreign-origin {
+  color: var(--lead); font-weight: 600;
+  background: color-mix(in srgb, var(--lead) 14%, transparent);
+  border-radius: 5px; padding: 0 6px;
+}
+.import-banner {
+  background: color-mix(in srgb, var(--lead) 12%, transparent);
+  border: 1px solid var(--lead); border-radius: 8px;
+  padding: 10px 13px; margin: 8px 0; font-size: 13px;
+}
+.import-banner b { color: var(--lead); }
 .user-chip { display: inline-flex; align-items: center; gap: 7px; }
 .user-chip b { color: var(--ink); font-size: 13px; }
 .reset-form { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }

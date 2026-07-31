@@ -86,6 +86,33 @@ def test_migration_v1_to_v2(tmp_path):
         assert c.attachment_blob(aid)[0] == PNG
 
 
+def test_edit_action_output(case):
+    from vera.db import sha256_text
+    a = case.add_action(command="vol.py ... psscan", output="old output")
+    assert case.get_action(a)["output"] == "old output"
+    # editing output replaces it AND re-derives the sha256; the change is audited
+    case.update_action(a, output="the real psscan table")
+    row = case.get_action(a)
+    assert row["output"] == "the real psscan table"
+    assert row["output_sha256"] == sha256_text("the real psscan table")
+    entry = case.audit(f"A{a}")[0]
+    assert "output" in entry["changes"]
+    # can also be blanked
+    case.update_action(a, output="")
+    r2 = case.get_action(a)
+    assert r2["output"] == "" and r2["output_sha256"] == ""
+
+
+def test_cli_edit_output_file(cli_case, capsys, tmp_path):
+    assert main(["run", "vol.py -f mem.img windows.psscan"]) == 0
+    out = tmp_path / "psscan.txt"
+    out.write_text("PID  PPID  ImageFileName\n4  0  System\n")
+    assert main(["edit", "A1", "--output-file", str(out)]) == 0
+    capsys.readouterr()
+    assert main(["show", "A1"]) == 0
+    assert "ImageFileName" in capsys.readouterr().out
+
+
 def test_manual_step(case):
     a = case.add_action(method="manual", tool="Registry Explorer",
                         procedure="opened NTUSER Run key", host="WS01")

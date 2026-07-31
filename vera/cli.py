@@ -1007,6 +1007,17 @@ def cmd_edit(args) -> int:
                 fields["command"] = args.command
             if args.tool is not None:
                 fields["tool"] = args.tool
+            # replace captured output — from a file, from stdin (--output -),
+            # or an inline string; re-hashed by update_action, audited
+            if getattr(args, "output_file", None) is not None:
+                if args.output_file == "-":
+                    fields["output"] = sys.stdin.read()
+                else:
+                    with open(args.output_file, encoding="utf-8",
+                              errors="replace") as fh:
+                        fields["output"] = fh.read()
+            elif args.output is not None:
+                fields["output"] = args.output
             if args.time is not None:
                 fields["performed_at"] = args.time
             if args.parent is not None:
@@ -1496,6 +1507,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="what a finding's event time means ('none' to clear)")
     p.add_argument("--command")
     p.add_argument("--tool")
+    p.add_argument("--output", help="(action) replace captured output with this text")
+    p.add_argument("--output-file", dest="output_file", metavar="FILE",
+                   help="(action) replace captured output from FILE ('-' = stdin)")
     p.add_argument("-t", "--type", help="change finding type")
     p.add_argument("--parent", metavar="F#",
                    help="re-link action under a finding ('none' to unlink)")

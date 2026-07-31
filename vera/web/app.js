@@ -2007,8 +2007,10 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
     el("textarea", { name: "procedure",
       placeholder: "In Registry Explorer, open NTUSER.DAT → …\\CurrentVersion\\Run",
     }, seed ? seed.procedure : ""), true);
-  const outputField = existing ? null
-    : field("Captured output (paste, optional)", el("textarea", { name: "output" }), true);
+  const outputField = field(
+    existing ? "Captured output (edit — replaces what's stored)"
+             : "Captured output (paste, optional)",
+    el("textarea", { name: "output" }, existing ? (seed.output || "") : ""), true);
   // exit code distinguishes "ran and found nothing" (0) from "failed to run"
   const exitField = field("Exit code (optional — 0 = success)",
     el("input", { name: "exit_code", type: "number", placeholder: "0",
@@ -2141,6 +2143,9 @@ function actionForm({ parentFindingId, existing, template, inheritEvidence, pref
         payload.exit_code = ec === "" || ec === null ? null : Number(ec);
       }
       if (existing) {
+        // editing a command step can also correct/replace its captured output
+        // (re-hashed server-side; the change is recorded in the audit log)
+        if (m === "command") payload.output = data.get("output") || "";
         await api(`/api/actions/${existing.id}`, { method: "PATCH", body: payload });
         await refreshInfo();
         await done(existing.id);

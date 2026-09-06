@@ -9,3 +9,7 @@ vera-users.db-*
 vera-audit.db
 vera-audit.db-*
 vera-server-key.pem
+
+# investigation case material — never publish to the tool repo
+srl.md
+srl_attachments/

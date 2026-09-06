@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import mimetypes
 import os
 import shlex
@@ -743,6 +744,78 @@ def cmd_artifacts(args) -> int:
     return 0
 
 
+def cmd_about(args) -> int:
+    with open_case(args) as case:
+        d = case.artifact_detail(args.query)
+    ident, ent = d["identity"], d["identity"]["entity"]
+    if ident["kind"] == "host":
+        print(f"H{ent['id']}  {ent['name']}  (host)")
+        if ent.get("aliases"):
+            print(f"  aliases: {', '.join(ent['aliases'])}")
+        for key, label in (("ip", "ip"), ("os", "os"),
+                           ("system_type", "type")):
+            if ent.get(key):
+                print(f"  {label}: {ent[key]}")
+    elif ident["kind"] == "account":
+        print(f"account {ent['id']}  {ent['name']}  (account)")
+        for key, label in (("domain", "domain"), ("sid", "sid"),
+                           ("account_type", "type")):
+            if ent.get(key):
+                print(f"  {label}: {ent[key]}")
+    else:
+        print(f"{ident['key']}  (free-text artifact)")
+    if ent and ent.get("status"):
+        print("  status: " + c(_STATUS_COLOR.get(ent["status"], "0"),
+                               ent["status"].upper()))
+    n = d["counts"]
+    print(f"{n['events']} timeline entr{'y' if n['events'] == 1 else 'ies'} "
+          f"({n['structured']} structured, {n['mentions']} "
+          f"mention{'' if n['mentions'] == 1 else 's'}) · "
+          f"{n['undated']} undated")
+
+    def keep(r) -> bool:
+        if args.clock != "all" and r["clock"] != args.clock:
+            return False
+        return not (args.structured and r["match"] != "structured")
+
+    def ref_str(r) -> str:
+        if r["kind"] == "finding":
+            return fid(r["id"])
+        if r["kind"] == "action":
+            return aid(r["id"])
+        return f"E{r['id']}"    # evidence has no tree node
+
+    def describe(r) -> str:
+        label = (f"[{r['ftype']}] {r['label']}" if r["kind"] == "finding"
+                 else r["label"])
+        out = f"{ref_str(r)}  {label}"
+        if r.get("host"):
+            out += f"  @{r['host']}"
+        if r["match"] == "mention":
+            out += "  " + c("2", f"(mention: {r['matched_in']})")
+        return out
+
+    print()
+    for r in d["events"]:
+        if not keep(r):
+            continue
+        clock = (c("1;35", "INC") if r["clock"] == "incident"
+                 else c("36", "INV"))
+        tag = (r.get("time_kind") or "-" if r["clock"] == "incident"
+               else ("step" if r["kind"] == "action" else "evidence"))
+        print(f"  {r['when']:<19} {clock} {tag:<9} {describe(r)}")
+        if r.get("snippet"):
+            print(f"      {c('2', r['snippet'])}")
+    undated = [r for r in d["undated"] if keep(r)]
+    if undated:
+        print("\nUndated findings:")
+        for r in undated:
+            print(f"  {describe(r)}")
+            if r.get("snippet"):
+                print(f"      {c('2', r['snippet'])}")
+    return 0
+
+
 def _resolve_finding_ref(ref: str) -> int:
     kind, fid = db.resolve_ref(ref)
     if kind != "F":
@@ -1161,6 +1234,20 @@ def cmd_serve(args) -> int:
                         case_dir=case_dir)
 
 
+def cmd_mcp(args) -> int:
+    from . import mcp_server
+    path = active_case_path(getattr(args, "case", None))
+    Case(path).close()  # fail fast on a bad path before speaking the protocol
+    if args.actor:
+        actor = args.actor
+    else:
+        try:
+            actor = f"mcp:{getpass.getuser()}"
+        except (KeyError, OSError):
+            actor = "mcp:unknown"
+    return mcp_server.serve(path, actor)
+
+
 # -- parser ------------------------------------------------------------------
 
 def _add_attr_flags(p: argparse.ArgumentParser) -> None:
@@ -1335,6 +1422,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("artifacts", help="host-based indicators stacked by "
                                          "artifact name, regardless of path")
     p.set_defaults(func=cmd_artifacts)
+
+    p = sub.add_parser("about", help="everything known about one artifact "
+                                     "(host, account, file, IP, hash, …) as "
+                                     "a timeline")
+    p.add_argument("query", help="artifact name/value, or host:<id> / "
+                                 "account:<id>")
+    p.add_argument("--clock", choices=["all", "incident", "investigation"],
+                   default="all", help="show only one clock (default: all)")
+    p.add_argument("--structured", action="store_true",
+                   help="hide free-text mentions")
+    p.set_defaults(func=cmd_about)
 
     p = sub.add_parser("clone", help="duplicate an action or finding (for similar "
                                      "entries) without re-typing everything")
@@ -1552,6 +1650,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--new", action="store_true",
                    help="open the New Investigation screen even if a case is active")
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("mcp", help="serve the case to AI assistants over MCP "
+                                   "stdio (needs: pip install vera[mcp])")
+    p.add_argument("--actor", metavar="NAME",
+                   help="attribute writes to this name (default: mcp:<username>)")
+    p.set_defaults(func=cmd_mcp)
 
     return parser
 

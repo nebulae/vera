@@ -1,3 +1,4 @@
+import asyncio
 import http.client
 import io
 import json
@@ -483,6 +484,20 @@ def test_attachment_roundtrip_and_graph(case):
 
     case.delete_attachment(idf)
     assert case.attachments("finding", f) == []
+
+
+def test_unattached_finding_keeps_followup_actions(case):
+    f = case.add_finding("tip from SOC", ftype="lead")
+    a = case.add_action("vol.py pstree", host="WS01", parent_finding_id=f)
+    orphans = case.unattached_findings()
+    assert [o["id"] for o in orphans] == [f]
+    assert [x["id"] for x in orphans[0]["actions"]] == [a]
+    # the follow-up action hangs off the orphan, not the tree roots
+    assert [r["id"] for r in case.tree()] == []
+    # and the CLI tree renderer walks it without blowing up
+    from vera.cli import _tree_lines
+    lines = "\n".join(_tree_lines(case))
+    assert "tip from SOC" in lines and "vol.py pstree" in lines
 
 
 def test_md_export_embeds_images(case, tmp_path):
@@ -2735,3 +2750,342 @@ def test_audit_cli(tmp_path, capsys):
     assert main(["--case", casep, "audit", "A1"]) == 0
     out = capsys.readouterr().out
     assert "A1  edited" in out and "notes" in out
+
+
+# ---- artifact focus ----------------------------------------------------
+
+def test_artifact_resolve_registry(case):
+    hid = case.add_host("WS01", aliases=["WKS-01"], ip="10.0.0.5")
+    acct = case.add_account("svc-backup", sid="S-1-5-21-7", domain="CORP")
+    for q in ("wks-01", "WS01", "10.0.0.5", f"host:{hid}"):
+        ident = case.resolve_artifact(q)
+        assert ident["kind"] == "host" and ident["entity"]["id"] == hid
+    assert "10.0.0.5" in case.resolve_artifact("ws01")["terms"]
+    for q in ("SVC-BACKUP", "S-1-5-21-7", f"account:{acct}"):
+        ident = case.resolve_artifact(q)
+        assert ident["kind"] == "account" and ident["entity"]["id"] == acct
+    ident = case.resolve_artifact("mimikatz.exe")
+    assert ident["kind"] == "term" and ident["terms"] == ["mimikatz.exe"]
+    with pytest.raises(CaseError):
+        case.resolve_artifact("host:99")
+    with pytest.raises(CaseError):
+        case.resolve_artifact("   ")
+
+
+def test_artifact_detail_structured_vs_mention(case):
+    a1 = case.add_action("vol.py -f ws01.mem windows.pstree", host="WS01")
+    f1 = case.add_finding("mimikatz dropped", ftype="malware", action_id=a1,
+                          event_time="2026-07-01 14:22",
+                          attrs={"filename": "mimikatz.exe",
+                                 "path": r"C:\temp"},
+                          hashes={"sha256": "aa" * 32})
+    a2 = case.add_action("strings ws01.mem", host="WS01",
+                         output="C:\\temp\\mimikatz.exe -dump lsass\n")
+    f2 = case.add_finding("operator note", ftype="note", action_id=a2,
+                          detail="saw mimikatz.exe mentioned in the ticket")
+    d = case.artifact_detail("mimikatz.exe")
+    assert d["identity"]["kind"] == "term"
+    by_ref = {r["ref"]: r for r in d["events"] + d["undated"]}
+    assert by_ref[f"F{f1}"]["match"] == "structured"
+    assert by_ref[f"F{f1}"]["matched_in"] == "attrs.filename"
+    assert by_ref[f"F{f1}"]["clock"] == "incident"
+    assert by_ref[f"A{a2}"]["match"] == "mention"
+    assert by_ref[f"A{a2}"]["matched_in"] == "output"
+    assert "mimikatz.exe" in by_ref[f"A{a2}"]["snippet"]
+    # the note has no event_time -> undated, as a detail mention
+    assert f"F{f2}" in {r["ref"] for r in d["undated"]}
+    assert by_ref[f"F{f2}"]["matched_in"] == "detail"
+    assert d["counts"]["structured"] == 1 and d["counts"]["mentions"] == 2
+    # querying by hash lands on the same finding, labeled by the algorithm
+    d2 = case.artifact_detail("aa" * 32)
+    assert {r["ref"]: r["matched_in"]
+            for r in d2["events"]}[f"F{f1}"] == "hashes.sha256"
+
+
+def test_artifact_host_expands_terms(case):
+    hid = case.add_host("WS01", aliases=["WKS-01"])
+    a1 = case.add_action("EvtxECmd -f Security.evtx",
+                         output="4624 logon to WKS-01 from 10.9.8.7\n")
+    f1 = case.add_finding("persistence on WS01", ftype="hostindicator",
+                          action_id=a1, host_ids=[hid],
+                          attrs={"path": "C:\\temp\\evil.dll"})
+    d = case.artifact_detail(f"host:{hid}")
+    by_ref = {r["ref"]: r for r in d["events"] + d["undated"]}
+    assert by_ref[f"F{f1}"]["match"] == "structured"
+    assert by_ref[f"F{f1}"]["matched_in"] == "host link"
+    # the action only mentions the ALIAS in its output; still found
+    assert by_ref[f"A{a1}"]["match"] == "mention"
+    assert by_ref[f"A{a1}"]["matched_in"] == "output"
+    assert "WKS-01" in by_ref[f"A{a1}"]["snippet"]
+
+
+def test_artifact_timeline_merges_clocks(case):
+    e1 = case.add_evidence("ws01 pcap", kind="pcap",
+                           acquired_at="sometime Tuesday",
+                           notes="pulled after the beacon-c2.example alert")
+    a1 = case.add_action("tshark -r ws01.pcap", host="WS01", evidence_id=e1,
+                         output="dns query beacon-c2.example\n")
+    f1 = case.add_finding("c2 domain observed", ftype="netindicator",
+                          action_id=a1, event_time="2026-07-01",
+                          time_kind="logged",
+                          attrs={"address": "beacon-c2.example"})
+    d = case.artifact_detail("beacon-c2.example")
+    refs = [r["ref"] for r in d["events"]]
+    assert set(refs) == {f"F{f1}", f"A{a1}", f"E{e1}"}
+    # incident event (July) sorts before today's investigation activity
+    assert refs[0] == f"F{f1}"
+    sorts = [r["sort"] for r in d["events"]]
+    assert sorts == sorted(sorts)
+    for r in d["events"]:
+        assert "UTC" not in r["when"]
+    by_ref = {r["ref"]: r for r in d["events"]}
+    assert by_ref[f"F{f1}"]["clock"] == "incident"
+    assert by_ref[f"A{a1}"]["clock"] == "investigation"
+    assert by_ref[f"E{e1}"]["clock"] == "investigation"
+    # free-text acquired_at is unparseable -> row falls back to created_at
+    assert by_ref[f"E{e1}"]["when"].startswith("20")
+    assert d["counts"]["incident"] == 1 and d["counts"]["investigation"] == 2
+
+
+def test_artifact_undated_separate(case):
+    a1 = case.add_action("strings dump.bin")
+    f1 = case.add_finding("evil.dll planted", ftype="malware", action_id=a1,
+                          attrs={"filename": "evil.dll"})
+    d = case.artifact_detail("evil.dll")
+    assert [r["ref"] for r in d["undated"]] == [f"F{f1}"]
+    assert all(r["kind"] != "finding" for r in d["events"])
+    assert d["counts"]["undated"] == 1
+
+
+def test_api_artifact(running_server):
+    port = running_server
+    status, raw = _req(port, "GET", "/api/artifact?q=rundll32.exe")
+    assert status == 200
+    data = json.loads(raw)
+    assert set(data) == {"identity", "events", "undated", "counts"}
+    refs = {r["ref"]: r for r in data["events"]}
+    assert refs["F1"]["match"] == "structured"
+    assert refs["A1"]["match"] == "mention"      # output mentions the file
+    status, _ = _req(port, "GET", "/api/artifact?q=")
+    assert status == 400
+    # free text naming a registered account upgrades to the entity
+    status, raw = _req(port, "GET", "/api/artifact?q=svc-backup")
+    assert status == 200
+    assert json.loads(raw)["identity"]["kind"] == "account"
+
+
+def test_cli_about(cli_case, capsys):
+    assert main(["run", "vol.py -f ws01.mem windows.pstree",
+                 "--host", "WS01"]) == 0
+    assert main(["finding", "mimikatz dropped", "-t", "malware",
+                 "--filename", "mimikatz.exe", "--time", "2026-07-01 14:22",
+                 "--time-kind", "created"]) == 0
+    assert main(["run", "echo C:\\temp\\mimikatz.exe spotted", "-x"]) == 0
+    capsys.readouterr()
+    assert main(["about", "mimikatz.exe"]) == 0
+    out = capsys.readouterr().out
+    assert "free-text artifact" in out
+    assert "F1" in out and "A2" in out
+    assert "INC" in out and "INV" in out
+    # the echo command itself names the file, so the mention lands on the
+    # command field (scanned before output); the dim snippet line follows
+    assert "(mention: command)" in out and "spotted" in out
+    # --structured hides the mention row
+    assert main(["about", "mimikatz.exe", "--structured"]) == 0
+    out = capsys.readouterr().out
+    assert "A2" not in out and "F1" in out
+    # --clock investigation hides the incident finding
+    assert main(["about", "mimikatz.exe", "--clock", "investigation"]) == 0
+    out = capsys.readouterr().out
+    assert "F1" not in out.split("timeline", 1)[1]
+
+
+# ---- mcp server --------------------------------------------------------
+
+from vera import mcp_server
+
+
+@pytest.fixture
+def mcp_case(tmp_path, monkeypatch):
+    """A sample case served by the MCP tool functions, writes attributed to
+    mcp:test. Tool logic is SDK-free, so these tests run without `mcp`."""
+    p = str(tmp_path / "m.vera")
+    with Case(p, create=True) as c:
+        c.set_meta(name="MCP Case")
+        build_sample(c)
+    monkeypatch.setitem(mcp_server._STATE, "path", p)
+    monkeypatch.setitem(mcp_server._STATE, "actor", "mcp:test")
+    yield p
+
+
+def test_mcp_status_and_tree(mcp_case):
+    s = mcp_server.status()
+    assert s["file"] == "m.vera"
+    assert s["meta"]["name"] == "MCP Case"
+    assert s["counts"]["actions"] == 2 and s["counts"]["findings"] == 3
+    text = mcp_server.tree()
+    assert "A1" in text and "rundll32 spawned by wmiprvse" in text
+
+
+def test_mcp_show_dispatch(mcp_case):
+    assert "pstree" in mcp_server.show("A1")["command"]
+    assert mcp_server.show("F1")["ftype"] == "malware"
+    assert mcp_server.show("E1")["label"] == "WS01 memory dump"
+    with Case(mcp_case) as c:
+        hid = c.add_host("WS01")
+        c.set_evidence_hosts(1, [hid])
+        cid = c.add_collection("KAPE sweep")
+    host = mcp_server.show("ws01")  # name lookup is case-insensitive
+    assert host["name"] == "WS01" and len(host["evidence"]) == 1
+    assert mcp_server.show(f"C{cid}")["name"] == "KAPE sweep"
+    with pytest.raises(CaseError, match="A#, F#, E#, C#"):
+        mcp_server.show("Z9")
+
+
+def test_mcp_log_action_attribution_and_inheritance(mcp_case):
+    with Case(mcp_case) as c:
+        h1, h2 = c.add_host("WS01"), c.add_host("WS02")
+        c.set_evidence_hosts(1, [h1, h2])
+    res = mcp_server.log_action(command="vol.py windows.psscan",
+                                evidence="E1", output="x" * 10)
+    assert res["ref"] == "A3" and res["output_chars"] == 10
+    a = mcp_server.show("A3")
+    # hosts inherited from the evidence; the write is attributed to the actor
+    assert {h["name"] for h in a["hosts"]} == {"WS01", "WS02"}
+    assert a["created_by"] == "mcp:test"
+    # explicit hosts beat inheritance, unknown hosts are rejected (strict)
+    res2 = mcp_server.log_action(command="reg query ...", evidence="E1",
+                                 hosts=["WS02"])
+    assert [h["name"] for h in mcp_server.show(res2["ref"])["hosts"]] == ["WS02"]
+    with pytest.raises(CaseError, match="no host matches"):
+        mcp_server.log_action(command="x", hosts=["NOPE"])
+    # a manual step needs a tool, follow-ups need an F ref
+    with pytest.raises(CaseError, match="manual step"):
+        mcp_server.log_action(method="manual", procedure="clicked around")
+    with pytest.raises(CaseError, match="finding reference"):
+        mcp_server.log_action(command="x", parent_finding="A1")
+
+
+def test_mcp_add_finding(mcp_case):
+    with pytest.raises(CaseError, match="netindicator"):
+        mcp_server.add_finding("x", ftype="bogus")
+    # default action='last' hangs the finding off the newest action
+    res = mcp_server.add_finding("persistence via run key",
+                                 ftype="hostindicator",
+                                 attrs={"artifact": "Run\\evil"},
+                                 hashes={"md5": "a" * 32})
+    f = mcp_server.show(res["ref"])
+    assert f["action_id"] == 2 and f["created_by"] == "mcp:test"
+    assert f["attrs"]["artifact"] == "Run\\evil" and f["hashes"]["md5"] == "a" * 32
+    # unattached + auto-registered account
+    res2 = mcp_server.add_finding("svc-backup reset its own password",
+                                  ftype="account", action="none",
+                                  accounts=["svc-backup"])
+    assert mcp_server.show(res2["ref"])["action_id"] is None
+    assert any(a["name"] == "svc-backup"
+               for a in mcp_server.status()["accounts"])
+
+
+def test_mcp_edit(mcp_case):
+    mcp_server.edit("F1", {"starred": True, "detail": "confirmed"})
+    f = mcp_server.show("F1")
+    assert f["starred"] == 1 and f["detail"] == "confirmed"
+    with pytest.raises(CaseError, match="bogus"):
+        mcp_server.edit("F1", {"bogus": 1})
+    with pytest.raises(CaseError, match="cannot edit"):
+        mcp_server.edit("C1", {"name": "x"})
+    entry = mcp_server.audit_log("F1")["entries"][0]
+    assert entry["who"] == "mcp:test" and "starred" in entry["changes"]
+
+
+def test_mcp_registries_and_collections(mcp_case):
+    assert mcp_server.add_hosts(["WS01", "WS02"],
+                                status="suspicious")["refs"] == ["H1", "H2"]
+    mcp_server.add_accounts(["svc-backup"], domain="CORP")
+    col = mcp_server.add_collection("KAPE triage", hosts=["WS01", "WS02"])
+    ev = mcp_server.add_evidence("WS01 kape output", kind="triage",
+                                 collection=col["ref"], hosts=["WS01"])
+    created = mcp_server.expand_collection(col["ref"])["created"]
+    assert [c["host"] for c in created] == ["WS02"]  # WS01 already covered
+    assert mcp_server.show(ev["ref"])["collection_id"] == 1
+
+
+def test_mcp_worklists(mcp_case):
+    item = mcp_server.add_lead_item("F1", "pull MFT around 14:22")
+    fu = mcp_server.worklists()["followups"]
+    assert [i["label"] for i in fu] == ["pull MFT around 14:22"]
+    # linking a finding triages the item off the open queue
+    mcp_server.set_lead_item(item["item_id"], finding="F2")
+    assert mcp_server.worklists()["followups"] == []
+    mcp_server.set_lead_item(item["item_id"], status="removed")
+    with Case(mcp_case) as c:
+        assert c.lead_items(1) == []
+
+
+def test_mcp_attach_and_clone(mcp_case, tmp_path):
+    shot = tmp_path / "tree.png"
+    shot.write_bytes(PNG)
+    res = mcp_server.attach_file("F1", str(shot), caption="proc tree")
+    assert res["bytes"] == len(PNG)
+    att = mcp_server.show("F1")["attachments"]
+    assert [a["filename"] for a in att] == ["tree.png"]
+    a = mcp_server.clone("A1", command="vol.py -f ws02.mem windows.pstree")
+    assert mcp_server.show(a["ref"])["output"] == ""  # output never copied
+    f = mcp_server.clone("F1", title="rundll32 on WS02")
+    assert mcp_server.show(f["ref"])["title"] == "rundll32 on WS02"
+
+
+def test_mcp_read_views_and_report(mcp_case):
+    assert len(mcp_server.list_findings("malware")["findings"]) == 1
+    with pytest.raises(CaseError, match="unknown type"):
+        mcp_server.list_findings("bogus")
+    assert len(mcp_server.timeline()["events"]) == 2
+    assert "cross_host_findings" in mcp_server.stacks()
+    assert mcp_server.artifact("rundll32.exe")["events"]
+    keys = {t["key"] for t in mcp_server.finding_types()["types"]}
+    assert keys == set(types.FINDING_TYPES)
+    assert "rundll32 spawned by wmiprvse" in mcp_server.case_report()
+
+
+def test_mcp_cli_gate_without_sdk(tmp_path, monkeypatch, capsys):
+    p = str(tmp_path / "g.vera")
+    Case(p, create=True).close()
+    monkeypatch.setattr(mcp_server, "_HAVE_MCP", False)
+    assert main(["--case", p, "mcp"]) == 1
+    assert "vera[mcp]" in capsys.readouterr().err
+
+
+def test_mcp_cli_bad_case_fails_fast(tmp_path, capsys):
+    assert main(["--case", str(tmp_path / "missing.vera"), "mcp"]) == 1
+    assert "vera:" in capsys.readouterr().err
+
+
+# the remaining tests exercise the real SDK integration (schema generation,
+# error conversion); they skip on a stdlib-only checkout
+_needs_sdk = pytest.mark.skipif(
+    not mcp_server.available(),
+    reason="mcp SDK not installed (pip install vera[mcp])")
+
+
+@_needs_sdk
+def test_mcp_sdk_registration(mcp_case):
+    server = mcp_server.build_server()
+    tools = asyncio.run(server.list_tools())
+    assert sorted(t.name for t in tools) == sorted(
+        f.__name__ for f in mcp_server._TOOLS)
+    # docstrings become the tool descriptions the model sees
+    for t in tools:
+        assert t.description, f"tool {t.name} has no description"
+
+
+@_needs_sdk
+def test_mcp_sdk_call_and_errors(mcp_case):
+    server = mcp_server.build_server()
+    res = asyncio.run(server.call_tool("status", {}))
+    body = json.loads(res.content[0].text)
+    assert body["counts"]["findings"] == 3
+    # a CaseError surfaces as a ToolError carrying the message (over the
+    # wire that is an is_error result the model can read and correct)
+    with pytest.raises(Exception, match="unknown type 'bogus'"):
+        asyncio.run(server.call_tool("add_finding",
+                                     {"title": "x", "ftype": "bogus"}))

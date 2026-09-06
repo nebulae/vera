@@ -11,6 +11,9 @@ const state = {
   timeRange: { from: "", to: "" },  // timeline filter, mirrored in the URL
   user: null,       // signed-in user from /api/auth
   canEdit: false,   // may this user modify the current case?
+  artifactQuery: "",        // /artifact page: what we're focused on
+  artifactClock: "all",     // all | incident | investigation
+  artifactMentions: true,   // show free-text mentions alongside structured
 };
 
 // host disposition — '' means not yet triaged
@@ -795,6 +798,7 @@ function tabToUrl(tabId, jumpTo) {
     if (state.timeRange.from) q.set("from", state.timeRange.from);
     if (state.timeRange.to) q.set("to", state.timeRange.to);
   }
+  if (tabId === "artifact" && state.artifactQuery) q.set("q", state.artifactQuery);
   const qs = q.toString();
   return qs ? `${path}?${qs}` : path;
 }
@@ -806,6 +810,7 @@ function urlToState() {
   if (path === "/") tab = "investigation";
   else if (path === "/leads") tab = "type:lead";
   else if (path.startsWith("/findings/")) tab = "type:" + path.slice(10);
+  else if (path === "/artifact") tab = "artifact";  // destination page, not a tab
   else if (PAGE_TABS.includes(path.slice(1))) tab = path.slice(1);
   if (!tab) return false;
   state.tab = tab;
@@ -823,6 +828,7 @@ function urlToState() {
     const clean = (v) => (v || "").replace(/[^\d: -]/g, "").trim();
     state.timeRange = { from: clean(q.get("from")), to: clean(q.get("to")) };
   }
+  if (tab === "artifact") state.artifactQuery = q.get("q") || "";
   return true;
 }
 
@@ -939,6 +945,7 @@ async function render() {
     else if (state.tab === "accounts") await renderAccounts(view);
     else if (state.tab === "coverage") await renderCoverage(view);
     else if (state.tab === "evidence") await renderEvidence(view);
+    else if (state.tab === "artifact") await renderArtifactPage(view);
     else if (state.tab.startsWith("type:")) {
       await renderCategory(view, state.tab.slice(5));
     }
@@ -1669,12 +1676,17 @@ function hostsInline(hosts, max = 3) {
   const list = hosts || [];
   if (!list.length) return null;
   const names = list.map((h) => h.name);
-  const shown = names.slice(0, max).join(", ");
-  const extra = names.length - max;
-  const text = extra > 0 ? `🖥 ${shown} +${extra} more` : `🖥 ${shown}`;
+  const extra = list.length - max;
+  const parts = ["🖥 "];
+  list.slice(0, max).forEach((h, i) => {
+    if (i) parts.push(", ");
+    parts.push(artLink(h.name, `host:${h.id}`));  // name → artifact timeline
+  });
+  if (extra > 0) parts.push(` +${extra} more`);
   return el("span", { class: "hosts-inline",
     title: `${names.length} host${names.length > 1 ? "s" : ""}: ${names.join(", ")}`,
-    onclick: (ev) => { ev.stopPropagation(); state.tab = "hosts"; render(); } }, text);
+    onclick: (ev) => { ev.stopPropagation(); state.tab = "hosts"; render(); } },
+    ...parts);
 }
 
 // Registry-account chip on finding cards (mirrors hostsInline): the linked
@@ -1683,13 +1695,17 @@ function accountsInline(accounts, max = 2) {
   const list = accounts || [];
   if (!list.length) return null;
   const names = list.map((a) => a.name);
-  const shown = names.slice(0, max).join(", ");
-  const extra = names.length - max;
-  const text = extra > 0 ? `👤 ${shown} +${extra} more` : `👤 ${shown}`;
+  const extra = list.length - max;
+  const parts = ["👤 "];
+  list.slice(0, max).forEach((a, i) => {
+    if (i) parts.push(", ");
+    parts.push(artLink(a.name, `account:${a.id}`));
+  });
+  if (extra > 0) parts.push(` +${extra} more`);
   return el("span", { class: "hosts-inline",
     title: `${names.length} account${names.length > 1 ? "s" : ""}: ${names.join(", ")}`,
     onclick: (ev) => { ev.stopPropagation(); state.tab = "accounts"; render(); } },
-    text);
+    ...parts);
 }
 
 // Clickable star used on every finding/lead card — toggles the "key finding"
@@ -2517,15 +2533,23 @@ function findingCard(f) {
       && !(k === "artifact" && a.path && v === basename(a.path)));
   const arrow = isLateral && (a.source_host || a.dest_host)
     ? el("span", { class: "lateral-arrow" },
-        el("b", {}, a.source_host || "?"), " ⟶ ", el("b", {}, a.dest_host || "?"))
+        el("b", {}, a.source_host ? artLink(a.source_host, a.source_host) : "?"),
+        " ⟶ ",
+        el("b", {}, a.dest_host ? artLink(a.dest_host, a.dest_host) : "?"))
     : null;
+  // artifact-bearing values link to the artifact timeline page
+  const chipVal = (k, v) => {
+    const inner = (k === "path" || k === "sid")
+      ? el("code", { class: "mono" }, v) : v;
+    return ARTIFACT_CHIP_KEYS.has(k) ? artLink(inner, String(v)) : inner;
+  };
   if (chips.length || arrow) {
     card.append(el("div", { class: "attr-chips" },
       arrow,
       chips.map(([k, v]) => el("span",
         { title: `${k.replaceAll("_", " ")}: ${v}` },
         el("b", {}, k.replaceAll("_", " ") + ": "),
-        (k === "path" || k === "sid") ? el("code", { class: "mono" }, v) : v))));
+        chipVal(k, v)))));
   }
   const hashes = Object.entries(f.hashes || {}).filter(([, v]) => v);
   if (hashes.length) {
@@ -2533,7 +2557,8 @@ function findingCard(f) {
     card.append(el("div", { class: "hash-row" }, hashes.map(([k, v]) =>
       el("span", { class: "hash-chip", title: "click to copy",
         onclick: () => navigator.clipboard && navigator.clipboard.writeText(v) },
-        el("b", {}, (HLABEL[k] || k) + " "), el("code", {}, v)))));
+        el("b", {}, (HLABEL[k] || k) + " "), el("code", {}, v),
+        " ", artLink("⌕", v)))));
   }
   if (f.detail) {
     // a lead's detail is usually a raw worklist dump — keep it collapsed so it
@@ -2590,6 +2615,30 @@ function refLink(refText, nodeId) {
       render();
     },
   }, refText);
+}
+
+/* ---------- artifact focus links ---------- */
+
+// attr keys whose value identifies an artifact (mirrors db.ARTIFACT_ATTR_KEYS)
+const ARTIFACT_CHIP_KEYS = new Set(["filename", "path", "artifact", "address",
+  "account", "sid", "source_host", "dest_host", "ip"]);
+
+function openArtifact(q) {
+  state.artifactQuery = q;
+  state.tab = "artifact";
+  history.pushState(null, "", "/artifact?q=" + encodeURIComponent(q));
+  render();
+}
+
+// inline clickable artifact reference: a real href (middle-click / copy-link
+// works), but a plain click stays in the SPA
+function artLink(text, q) {
+  return el("a", {
+    class: "art-link",
+    href: "/artifact?q=" + encodeURIComponent(q),
+    title: "everything about this artifact, on a timeline",
+    onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openArtifact(q); },
+  }, text);
 }
 
 /* ---------- stack view (cross-host, rare-first) ---------- */
@@ -2664,7 +2713,8 @@ async function renderHosts(view) {
   function liveRow(h) {
     const tr = el("tr", { class: "host-row" + statusClass(h.status) });
     const inputs = {};
-    tr.append(el("td", { class: "mono host-ref" }, `H${h.id}`));
+    tr.append(el("td", { class: "mono host-ref" },
+      artLink(`H${h.id}`, `host:${h.id}`)));
     for (const c of cols) {
       const inp = c.select ? statusSelect(h[c.key])
         : el("input", { class: "cell " + c.cls, value: cellVal(h, c.key),
@@ -2797,6 +2847,11 @@ function openHostPanel(h, detail) {
     section("Evidence", evRows),
     section("Actions", actRows),
     section("Findings", findRows),
+    el("p", {}, el("a", { class: "art-link",
+      href: "/artifact?q=" + encodeURIComponent(`host:${h.id}`),
+      onclick: (ev) => { ev.preventDefault(); overlay.remove();
+        openArtifact(`host:${h.id}`); } },
+      "Full timeline →")),
     el("button", { class: "btn small", onclick: () => overlay.remove() }, "Close")));
   document.body.append(overlay);
 }
@@ -2840,7 +2895,8 @@ async function renderAccounts(view) {
 
   function liveRow(a) {
     const tr = el("tr", { class: "host-row" + statusClass(a.status) });
-    tr.append(el("td", { class: "mono host-ref" }, String(a.id)));
+    tr.append(el("td", { class: "mono host-ref" },
+      artLink(String(a.id), `account:${a.id}`)));
     for (const c of cols) {
       const inp = c.select ? statusSelect(a[c.key])
         : el("input", { class: "cell " + c.cls, value: a[c.key] || "",
@@ -2947,6 +3003,11 @@ function accountFindingsLink(a) {
           el("a", { class: "ref-link", href: "#", onclick: jump(`node-F${f.id}`) }, `F${f.id}`),
           " ", el("span", {}, `[${typeInfo(f.ftype).label}] ${f.title}`),
           f.event_time ? el("span", { class: "meta" }, ` · ${f.event_time}`) : null)),
+      el("p", {}, el("a", { class: "art-link",
+        href: "/artifact?q=" + encodeURIComponent(`account:${a.id}`),
+        onclick: (ev2) => { ev2.preventDefault(); overlay.remove();
+          openArtifact(`account:${a.id}`); } },
+        "Full timeline →")),
       el("button", { class: "btn small", onclick: () => overlay.remove() }, "Close")));
     document.body.append(overlay);
   });
@@ -3077,17 +3138,35 @@ function segBtn(label, active, onclick) {
 }
 
 function categoryTable(t, rows) {
+  // Detail is NOT a column — a long detail would crush every other column into
+  // a sliver. It renders full-width in its own row beneath the finding.
+  // Only keep attribute columns some row actually fills: a type's full field set
+  // (e.g. size/created/modified on malware) otherwise leaves permanently-empty
+  // columns that squeeze Title and Path — and shrink Path below its natural
+  // width, forcing the ugly mid-word wraps.
+  const fields = t.fields.filter((fld) =>
+    rows.some((f) => String((f.attrs || {})[fld.key] || "").trim() !== ""));
   const headers = ["Ref", "Title", "Host", "Event time",
-    ...t.fields.map((f) => f.label), "Detail"];
-  return el("table", {},
-    el("thead", {}, el("tr", {}, headers.map((h) => el("th", {}, h)))),
-    el("tbody", {}, rows.map((f) => el("tr", {},
+    ...fields.map((f) => f.label)];
+  const span = headers.length;
+  const body = [];
+  for (const f of rows) {
+    body.push(el("tr", { class: "cat-row" + (f.detail ? " has-detail" : "") },
       el("td", {}, refLink(`F${f.id}`, `node-F${f.id}`)),
-      el("td", {}, (f.starred ? "★ " : "") + f.title),
+      el("td", { class: "cat-title" }, (f.starred ? "★ " : "") + f.title),
       el("td", {}, f.host),
       el("td", { class: "mono" }, f.event_time),
-      t.fields.map((fld) => el("td", { class: "mono" }, (f.attrs || {})[fld.key] || "")),
-      el("td", {}, f.detail)))));
+      fields.map((fld) => el("td", { class: "mono cat-attr" },
+        (f.attrs || {})[fld.key] || ""))));
+    if (f.detail) {
+      body.push(el("tr", { class: "cat-detail-row" },
+        el("td", { colspan: String(span) },
+          el("div", { class: "cat-detail" }, f.detail))));
+    }
+  }
+  return el("table", { class: "cat-table" },
+    el("thead", {}, el("tr", {}, headers.map((h) => el("th", {}, h)))),
+    el("tbody", {}, ...body));
 }
 
 async function renderCategory(view, typeKey) {
@@ -3190,7 +3269,7 @@ async function renderHostIndicators(view, t) {
 
 function artifactGroupCard(g) {
   const head = el("div", { class: "art-head" },
-    el("span", { class: "art-name" }, g.name),
+    el("span", { class: "art-name" }, artLink(g.name, g.name)),
     el("span", { class: "stack-n mono" }, `×${g.count}`),
     g.artifact_types.length ? el("span", { class: "tag" }, g.artifact_types.join(", ")) : null,
     el("span", { class: "art-hosts" },
@@ -3228,7 +3307,7 @@ async function renderArtifacts(view) {
     el("thead", {}, el("tr", {},
       ["Artifact", "×", "Type", "Hosts", "Refs", "Paths"].map((h) => el("th", {}, h)))),
     el("tbody", {}, groups.map((g) => el("tr", {},
-      el("td", {}, el("b", {}, g.name)),
+      el("td", {}, el("b", {}, artLink(g.name, g.name))),
       el("td", { class: "mono stack-n" }, String(g.count)),
       el("td", {}, g.artifact_types.join(", ")),
       el("td", {}, `${g.host_count}${g.hosts.length ? " — " + g.hosts.map((h) => h.name).join(", ") : ""}`),
@@ -3237,6 +3316,154 @@ async function renderArtifacts(view) {
       el("td", {}, el("div", { class: "path-list" },
         (g.paths.length ? g.paths : ["—"]).map((p) => el("code", { class: "mono" }, p))))))));
   view.append(el("div", { class: "table-wrap" }, table));
+}
+
+/* ---------- artifact focus: everything about one thing, on a timeline ---------- */
+
+async function renderArtifactPage(view) {
+  const q = (state.artifactQuery || "").trim();
+  view.replaceChildren();
+
+  const input = el("input", { class: "art-search", value: q, list: "art-suggest",
+    placeholder: "host, account, filename, IP, domain, hash — anything…",
+    autocomplete: "off" });
+  const go = () => { if (input.value.trim()) openArtifact(input.value.trim()); };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+  view.append(el("div", { class: "toolbar" },
+    input,
+    el("button", { class: "btn small", onclick: go }, "Look up"),
+    el("datalist", { id: "art-suggest" },
+      (state.info.hosts || []).map((h) => el("option", { value: h.name })),
+      (state.info.accounts || []).map((a) => el("option", { value: a.name })))));
+
+  if (!q) {
+    view.append(el("div", { class: "empty" },
+      el("p", { class: "empty-title" }, "Pick an artifact"),
+      el("p", { class: "empty-hint" },
+        "Search above, or click any artifact value on a finding — a filename, "
+        + "address, host, account, or hash — to see everything the case knows "
+        + "about it.")));
+    return;
+  }
+
+  let d;
+  try {
+    d = await api("/api/artifact?q=" + encodeURIComponent(q));
+  } catch (err) {
+    view.append(el("div", { class: "form-error" }, String(err.message || err)));
+    return;
+  }
+  const ent = d.identity.entity;
+  const terms = d.identity.terms || [];
+  const icon = { host: "🖥 ", account: "👤 " }[d.identity.kind] || "";
+  view.append(el("div", { class: "art-idhead" },
+    el("h3", {}, icon + d.identity.key),
+    el("span", { class: "tag" },
+      d.identity.kind === "term" ? "artifact" : d.identity.kind),
+    ent && ent.status ? statusPill(ent.status) : null,
+    ent ? el("span", { class: "meta mono" },
+      d.identity.kind === "host" ? `H${ent.id}` : `account ${ent.id}`) : null));
+  const bits = [];
+  if (ent && d.identity.kind === "host") {
+    if ((ent.aliases || []).length) bits.push("aliases: " + ent.aliases.join(", "));
+    for (const k of ["ip", "os", "system_type"]) if (ent[k]) bits.push(ent[k]);
+  } else if (ent) {
+    for (const k of ["domain", "sid", "account_type"]) if (ent[k]) bits.push(ent[k]);
+  }
+  const n = d.counts;
+  bits.push(`${n.events} timeline entr${n.events === 1 ? "y" : "ies"}`);
+  bits.push(`${n.structured} structured · ${n.mentions} mention${n.mentions === 1 ? "" : "s"}`);
+  if (n.undated) bits.push(`${n.undated} undated`);
+  view.append(el("p", { class: "hint" }, bits.join(" · ")));
+
+  const clock = state.artifactClock, mentions = state.artifactMentions;
+  const keep = (r) => (clock === "all" || r.clock === clock)
+    && (mentions || r.match === "structured");
+  const shown = d.events.filter(keep);
+  const undated = d.undated.filter(keep);
+  view.append(el("div", { class: "toolbar" },
+    segBtn("All", clock === "all", () => { state.artifactClock = "all"; render(); }),
+    segBtn("Incident", clock === "incident", () => { state.artifactClock = "incident"; render(); }),
+    segBtn("Investigation", clock === "investigation", () => { state.artifactClock = "investigation"; render(); }),
+    el("span", { class: "hint" }, "·"),
+    segBtn("Mentions", mentions, () => { state.artifactMentions = !mentions; render(); }),
+    el("span", { class: "hint" },
+      `${shown.length + undated.length} of ${d.events.length + d.undated.length} entries · `
+      + "incident clock = when it happened; investigation clock = when we looked")));
+
+  // <mark> the first matched term in a snippet (terms come casefolded)
+  const markTerms = (text) => {
+    const low = text.toLowerCase();
+    let best = null;
+    for (const t of terms) {
+      const i = low.indexOf(t);
+      if (i >= 0 && (best === null || i < best[0])) best = [i, t.length];
+    }
+    if (!best) return [text];
+    return [text.slice(0, best[0]),
+      el("mark", {}, text.slice(best[0], best[0] + best[1])),
+      text.slice(best[0] + best[1])];
+  };
+  const clockPill = (c) => el("span",
+    { class: "clk-pill clk-" + c, title: c + " clock" },
+    c === "incident" ? "INC" : "INV");
+  const means = (r) => r.clock === "incident" ? (r.time_kind || "—")
+    : (r.kind === "action" ? "step" : "evidence");
+  const refCell = (r) => r.kind === "evidence"
+    ? el("span", { class: "mono" }, r.ref)   // evidence has no tree node
+    : refLink(r.ref, `node-${r.ref}`);
+  const whatCell = (r) => el("span", {},
+    r.starred ? "★ " : "",
+    r.kind === "finding" ? el("span", { class: "tag" }, typeInfo(r.ftype).label) : null,
+    r.kind === "finding" ? " " : "",
+    r.kind === "action" ? el("code", { class: "mono" }, r.label) : r.label);
+  const matchCell = (r) => el("span", { class: "meta" },
+    r.match === "mention" ? `mention (${r.matched_in.replace("attrs.", "")})`
+      : r.matched_in.replace("attrs.", ""));
+
+  if (shown.length) {
+    const body = [];
+    for (const r of shown) {
+      body.push(el("tr", { class: r.match === "mention" ? "art-mention" : "" },
+        el("td", { class: "mono" }, r.when),
+        el("td", {}, clockPill(r.clock)),
+        el("td", { class: "meta" }, means(r)),
+        el("td", {}, whatCell(r)),
+        el("td", {}, r.host),
+        el("td", {}, matchCell(r)),
+        el("td", {}, refCell(r))));
+      if (r.snippet) {
+        body.push(el("tr", { class: "art-snippet-row" },
+          el("td", { colspan: "7" },
+            el("div", { class: "art-snippet" }, markTerms(r.snippet)))));
+      }
+    }
+    view.append(el("div", { class: "table-wrap" }, el("table", {},
+      el("thead", {}, el("tr", {},
+        ["Date / Time", "Clock", "Means", "What", "Host", "Match", "Ref"]
+          .map((h) => el("th", {}, h)))),
+      el("tbody", {}, ...body))));
+  }
+  if (undated.length) {
+    view.append(el("h4", { class: "host-panel-h" }, "Undated"));
+    for (const r of undated) {
+      view.append(el("div",
+        { class: "host-panel-row" + (r.match === "mention" ? " art-mention" : "") },
+        refCell(r), " ", whatCell(r),
+        r.host ? el("span", { class: "meta" }, ` · ${r.host}`) : null,
+        el("span", { class: "meta" }, " · "), matchCell(r)));
+      if (r.snippet) view.append(
+        el("div", { class: "art-snippet" }, markTerms(r.snippet)));
+    }
+  }
+  if (!shown.length && !undated.length) {
+    view.append(el("div", { class: "empty" },
+      el("p", { class: "empty-title" }, "Nothing matches"),
+      el("p", { class: "empty-hint" },
+        d.events.length + d.undated.length
+          ? "Everything recorded about this artifact is filtered out — widen the clock or turn mentions back on."
+          : `Nothing in the case references “${q}” yet.`)));
+  }
 }
 
 /* ---------- leads (triage worklists) ---------- */

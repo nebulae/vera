@@ -1033,6 +1033,21 @@ table.art-members { margin-top: 4px; }
   padding: 14px; margin: 10px 0; user-select: all; word-break: break-all;
   background: var(--code-bg); border: 1px dashed var(--line); border-radius: 8px;
 }
+/* category sheets: detail lives full-width under each finding, not squeezed
+   into a column that crushes everything else */
+.cat-table td { vertical-align: top; }
+/* a finding with a detail hands its bottom border to the detail row below, so
+   the two read as one block; a detail-less finding keeps its own separator */
+.cat-row.has-detail > td { border-bottom: none; padding-bottom: 3px; }
+.cat-title { font-weight: 600; min-width: 16ch; }
+.cat-attr { max-width: 42ch; overflow-wrap: anywhere; }
+.cat-detail-row > td { padding-top: 0; }
+.cat-detail {
+  font-size: 13px; line-height: 1.5; color: var(--muted);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  padding: 4px 0 10px 2px; max-width: 90ch;
+  border-left: 2px solid var(--line); padding-left: 12px; margin-left: 2px;
+}
 .byline.foreign-origin {
   color: var(--lead); font-weight: 600;
   background: color-mix(in srgb, var(--lead) 14%, transparent);
@@ -1120,4 +1135,41 @@ table.lead-table tbody tr:last-child td { border-bottom: none; }
   font: inherit; font-size: 13px; padding: 4px 8px;
   border: 1px solid var(--line); border-radius: 6px;
   background: var(--bg); color: var(--ink);
+}
+
+/* ---------- artifact focus (everything about one thing, on a timeline) ---------- */
+.art-link {
+  color: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.art-link:hover { color: var(--accent); text-decoration-style: solid; }
+.art-search {
+  font: inherit; font-size: 14px; padding: 6px 10px; width: 34rem; max-width: 60vw;
+  color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.art-idhead { display: flex; align-items: center; gap: 10px; margin: 12px 0 2px; }
+.art-idhead h3 { margin: 0; }
+/* the two clocks: incident (what happened) vs investigation (what we did) */
+.clk-pill {
+  font-family: var(--mono); font-weight: 700; font-size: 11px;
+  padding: 1px 6px; border-radius: 6px;
+}
+.clk-incident { color: var(--finding); background: color-mix(in srgb, var(--finding) 14%, transparent); }
+.clk-investigation { color: var(--action); background: color-mix(in srgb, var(--action) 12%, transparent); }
+/* free-text mentions are second-class: muted row, dim context line below */
+tr.art-mention td { color: var(--muted); }
+tr.art-mention td .tag { opacity: 0.7; }
+.art-snippet-row > td { border-bottom: none; padding-top: 0; }
+.art-snippet {
+  font-family: var(--mono); font-size: 12px; color: var(--muted);
+  border-left: 2px solid var(--line);
+  padding: 2px 0 2px 12px; margin: 0 0 6px 2px;
+  overflow-wrap: anywhere;
+}
+.art-snippet mark {
+  background: color-mix(in srgb, var(--star) 30%, transparent);
+  color: var(--ink); border-radius: 3px; padding: 0 1px;
 }

@@ -481,6 +481,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(case.stack_findings())
             elif url.path == "/api/artifacts":
                 self._json(case.artifact_stacks())
+            elif url.path == "/api/artifact":
+                aq = ((q.get("q") or [""])[0]).strip()
+                if not aq:
+                    self._error("missing q", 400)
+                    return
+                self._json(case.artifact_detail(aq))
             elif url.path == "/api/leads":
                 self._json(case.leads())
             elif url.path == "/api/followups":

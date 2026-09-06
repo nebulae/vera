@@ -27,6 +27,9 @@ For **cryptographically signed provenance** (Ed25519 — see *Collaboration*),
 install the optional extra: `pip install "vera[provenance]"`. Without it, export
 bundles are still hash-verified, just unsigned.
 
+For the **MCP server** (`vera mcp` — see *AI assistants*), install
+`pip install "vera[mcp]"`.
+
 ## Quickstart
 
 ```sh
@@ -255,6 +258,62 @@ cross-host finding jumps to the registry.
 on the right view. A ref jump is a deep link too: `/investigation?F=13` or
 `?A=24` opens the tree expanded to that node — click a finding's ref anywhere
 (Timeline, a category sheet) and copy the URL straight to a teammate.
+
+## AI assistants (MCP)
+
+`vera mcp` serves the active case over the
+[Model Context Protocol](https://modelcontextprotocol.io) — an open standard, so
+any MCP-capable client can drive an investigation with you: query the tree,
+stacks, timeline, and coverage; log actions with their captured output; record
+findings; manage the registries and worklists. It needs the optional extra:
+`pip install "vera[mcp]"`.
+
+Register it with the standard `mcpServers` config (the same JSON shape works in
+Claude Code, Cursor, Zed, VS Code, and most other clients):
+
+```json
+{
+  "mcpServers": {
+    "vera": {
+      "command": "vera",
+      "args": ["mcp", "--case", "/path/to/inv.vera"]
+    }
+  }
+}
+```
+
+Omit `--case` to serve whatever `vera use` / `$VERA_CASE` selects at launch;
+either way the case is **fixed for the life of the session** — a later
+`vera use` never redirects a running assistant.
+
+To get the **web dashboard alongside the assistant**, point the client's
+`command` at `start.sh` (repo root) instead — it starts `vera serve` in the
+background (or reuses one already on the port), runs the MCP server on stdio,
+and stops the dashboard when the session ends:
+
+```json
+{
+  "mcpServers": {
+    "vera": {
+      "command": "/path/to/vera/start.sh",
+      "args": ["--case", "/path/to/inv.vera", "--no-browser"]
+    }
+  }
+}
+```
+
+It takes `--case`, `--port` (dashboard, default 8845), `--actor`, and
+`--no-browser`, and also works standalone in a terminal (Ctrl+C stops both).
+
+The tool surface is read + write, minus anything administrative: no case
+creation, membership, adoption, exports, or deletes — those stay in the CLI and
+web UI. Every write is attributed: `created_by` and the per-case audit log
+record `mcp:<username>` (override with `--actor`), so AI-entered records are
+always distinguishable from your own.
+
+**Trust model:** same as the CLI. The server speaks stdio to a local client
+process — no network listener, no auth layer — and can do exactly what anyone
+who could launch `vera` on that machine could already do.
 
 ## Collaboration & access control
 

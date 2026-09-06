@@ -23,6 +23,12 @@ OS_KEYWORDS = ("windows", "server", "ubuntu", "linux", "macos", "mac", "rhel",
 # Hash algorithms a finding can carry, with their expected hex-digest length.
 HASH_SPECS = {"md5": 32, "sha1": 40, "sha256": 64}
 
+# Attr keys that carry an artifact's identity — equality against one of these
+# makes a finding a STRUCTURED match on the artifact page (vs a free-text
+# mention somewhere in its prose).
+ARTIFACT_ATTR_KEYS = ("filename", "path", "artifact", "address", "account",
+                      "sid", "source_host", "dest_host", "ip")
+
 # Host disposition. '' = not yet triaged; the Comp. Hosts view derives from this.
 HOST_STATUSES = ("", "clean", "suspicious", "compromised")
 
@@ -475,6 +481,47 @@ def _check_time_kind(kind: str) -> str:
         known = ", ".join(t or "unspecified" for t in TIME_KINDS)
         raise CaseError(f"unknown time kind {kind!r} (one of: {known})")
     return k
+
+
+def _artifact_sort_key(ts: str) -> str:
+    """Uniform sort key for mixing incident event times with record times
+    ('YYYY-MM-DD HH:MM:SS UTC'): normalize, then pad to full seconds so
+    date-only and minute-precision values interleave predictably. Returns ''
+    when the value is unparseable (the caller decides the fallback)."""
+    try:
+        v = normalize_event_time(ts)
+    except CaseError:
+        return ""
+    if not v:
+        return ""
+    if len(v) == 10:                # date only
+        return v + " 00:00:00"
+    if len(v) == 16:                # minute precision
+        return v + ":00"
+    return v
+
+
+def _snippet(text: str, terms: list[str], radius: int = 60) -> tuple[str, str]:
+    """First occurrence of any (casefolded) term in text, with surrounding
+    context collapsed to one line. Returns (snippet, matched_term), or
+    ('', '') when nothing matches."""
+    low = (text or "").casefold()
+    best: tuple[int, str] | None = None
+    for t in terms:
+        pos = low.find(t)
+        if pos >= 0 and (best is None or pos < best[0]):
+            best = (pos, t)
+    if best is None:
+        return "", ""
+    pos, term = best
+    start = max(0, pos - radius)
+    end = min(len(text), pos + len(term) + radius)
+    snip = " ".join(text[start:end].split())
+    if start > 0:
+        snip = "…" + snip
+    if end < len(text):
+        snip += "…"
+    return snip, term
 
 
 def _migrate_v13(conn: sqlite3.Connection) -> None:
@@ -1318,6 +1365,12 @@ class Case:
         actions it prompted. Orphan findings (no action) appear at the end
         under a synthetic 'unattached' bucket handled by callers.
         """
+        return self._graph()[0]
+
+    def unattached_findings(self) -> list[dict]:
+        return self._graph()[1]
+
+    def _graph(self) -> tuple[list[dict], list[dict]]:
         att = self._attachment_index()
         ahosts = self._host_links("action_hosts")
         actions = {}
@@ -1342,17 +1395,8 @@ class Case:
                 findings[pf]["actions"].append(a)
             else:
                 roots.append(a)
-        return roots
-
-    def unattached_findings(self) -> list[dict]:
-        att = self._attachment_index()
-        out = []
-        for r in self.conn.execute(
-                "SELECT * FROM findings WHERE action_id IS NULL ORDER BY id"):
-            f = self._finding_dict(r)
-            f["attachments"] = att.get(("finding", f["id"]), [])
-            out.append(f)
-        return self._enrich(out)
+        orphans = [f for f in findings.values() if f["action_id"] is None]
+        return roots, orphans
 
     def counts(self) -> dict:
         c = {}
@@ -2080,6 +2124,253 @@ class Case:
             out.append(g)
         out.sort(key=lambda g: (-g["count"], -g["host_count"], g["name"].lower()))
         return out
+
+    # -- artifact focus (everything we know about one thing) ---------------
+
+    def resolve_artifact(self, query: str) -> dict:
+        """Resolve an artifact query — 'host:<id>' / 'account:<id>' or free
+        text — into an identity plus the term set used for matching.
+
+        Free text that names a registered host (name/alias/IP) or account
+        (name/SID) is upgraded to that entity, so a typed search and a chip
+        click land on the same page."""
+        q = (query or "").strip()
+        if not q:
+            raise CaseError("empty artifact query")
+        m = re.match(r"^(host|account):(\d+)$", q)
+        if m:
+            kind, table = m.group(1), m.group(1) + "s"
+            row = self.conn.execute(
+                f"SELECT * FROM {table} WHERE id = ? AND deleted_at = ''",
+                (int(m.group(2)),)).fetchone()
+            if not row:
+                raise CaseError(f"no such artifact {q!r}")
+            return self._artifact_identity(kind, dict(row))
+        hid = self._find_host(q)
+        if hid is None:
+            row = self.conn.execute(
+                "SELECT id FROM hosts WHERE ip = ? AND ip != '' "
+                "AND deleted_at = ''", (q,)).fetchone()
+            hid = row["id"] if row else None
+        if hid is not None:
+            return self._artifact_identity("host", dict(self.conn.execute(
+                "SELECT * FROM hosts WHERE id = ?", (hid,)).fetchone()))
+        acct_id = self._find_account(q)
+        if acct_id is None:
+            row = self.conn.execute(
+                "SELECT id FROM accounts WHERE sid = ? COLLATE NOCASE "
+                "AND sid != '' AND deleted_at = ''", (q,)).fetchone()
+            acct_id = row["id"] if row else None
+        if acct_id is not None:
+            return self._artifact_identity("account", dict(self.conn.execute(
+                "SELECT * FROM accounts WHERE id = ?", (acct_id,)).fetchone()))
+        return {"kind": "term", "key": q, "entity": None,
+                "terms": [q.casefold()]}
+
+    @staticmethod
+    def _artifact_identity(kind: str, row: dict) -> dict:
+        """Identity dict for a registry entity, expanding its alternate names
+        (aliases/IP for hosts, SID/DOMAIN\\name for accounts) into match terms."""
+        terms = {row["name"].casefold()}
+        if kind == "host":
+            try:
+                row["aliases"] = json.loads(row.get("aliases") or "[]")
+            except json.JSONDecodeError:
+                row["aliases"] = []
+            terms.update(str(a).casefold() for a in row["aliases"])
+            if row.get("ip"):
+                terms.add(row["ip"].casefold())
+        else:
+            if row.get("sid"):
+                terms.add(row["sid"].casefold())
+            if row.get("domain"):
+                terms.add(f"{row['domain']}\\{row['name']}".casefold())
+        # 1-char terms substring-match everything; not worth the noise
+        return {"kind": kind, "key": row["name"], "entity": row,
+                "terms": sorted(t for t in terms if len(t) >= 2)}
+
+    def artifact_detail(self, query: str) -> dict:
+        """Everything the case knows about one artifact, as a dual-clock
+        timeline: findings at their incident event_time, actions and evidence
+        at their investigation (record) time. Structured matches (registry
+        links, typed-attr/hash equality) outrank free-text mentions; every
+        object appears at most once."""
+        ident = self.resolve_artifact(query)
+        terms = ident["terms"]
+        entity = ident["entity"]
+        kind = ident["kind"]
+
+        # findings: structured pass (links + typed-attr/hash equality) …
+        findings = self.findings()
+        f_match: dict[int, str] = {}
+        if kind == "host":
+            for r in self.conn.execute(
+                    "SELECT finding_id FROM finding_hosts WHERE host_id = ?",
+                    (entity["id"],)):
+                f_match[r["finding_id"]] = "host link"
+        elif kind == "account":
+            for r in self.conn.execute(
+                    "SELECT finding_id FROM finding_accounts WHERE account_id = ?",
+                    (entity["id"],)):
+                f_match[r["finding_id"]] = "account link"
+        for f in findings:
+            if f["id"] in f_match:
+                continue
+            attrs = f.get("attrs") or {}
+            hit = next((f"attrs.{k}" for k in ARTIFACT_ATTR_KEYS
+                        if str(attrs.get(k) or "").strip().casefold() in terms),
+                       "")
+            if not hit and f.get("ftype") in ("hostindicator", "filesystem") \
+                    and types.artifact_name(f).casefold() in terms:
+                hit = "artifact name"
+            if not hit:
+                hit = next((f"hashes.{algo}" for algo, v
+                            in (f.get("hashes") or {}).items()
+                            if str(v).casefold() in terms), "")
+            if hit:
+                f_match[f["id"]] = hit
+        # … then mention pass over the rest
+        f_mention: dict[int, tuple[str, str]] = {}
+        for f in findings:
+            if f["id"] in f_match:
+                continue
+            fields = [("title", f.get("title", "")),
+                      ("detail", f.get("detail", ""))]
+            fields += [(f"attrs.{k}", str(v))
+                       for k, v in (f.get("attrs") or {}).items()]
+            fields += [(f"hashes.{k}", str(v))
+                       for k, v in (f.get("hashes") or {}).items()]
+            for name, text in fields:
+                snip, term = _snippet(text, terms)
+                if term:
+                    f_mention[f["id"]] = (name, snip)
+                    break
+
+        # actions: host links / legacy host field, then mentions (output last —
+        # cheaper fields short-circuit before the big blob)
+        actions = [dict(r) for r in
+                   self.conn.execute("SELECT * FROM actions ORDER BY id")]
+        action_hosts = self._host_links("action_hosts")
+        a_match: dict[int, str] = {}
+        if kind == "host":
+            for r in self.conn.execute(
+                    "SELECT action_id FROM action_hosts WHERE host_id = ?",
+                    (entity["id"],)):
+                a_match[r["action_id"]] = "host link"
+        for a in actions:
+            if a["id"] not in a_match \
+                    and (a.get("host") or "").strip().casefold() in terms:
+                a_match[a["id"]] = "host field"
+        a_mention: dict[int, tuple[str, str]] = {}
+        for a in actions:
+            if a["id"] in a_match:
+                continue
+            for name in ("command", "procedure", "notes", "tool", "host",
+                         "output"):
+                snip, term = _snippet(a.get(name) or "", terms)
+                if term:
+                    a_mention[a["id"]] = (name, snip)
+                    break
+
+        # evidence: host links, then mentions
+        evidence = self.evidence()
+        e_match: dict[int, str] = {}
+        if kind == "host":
+            for e in evidence:
+                if any(h["id"] == entity["id"] for h in e.get("hosts", [])):
+                    e_match[e["id"]] = "host link"
+        e_mention: dict[int, tuple[str, str]] = {}
+        for e in evidence:
+            if e["id"] in e_match:
+                continue
+            for name in ("label", "source", "notes", "acquisition",
+                         "acquired_by", "sha256"):
+                snip, term = _snippet(e.get(name) or "", terms)
+                if term:
+                    e_mention[e["id"]] = (name, snip)
+                    break
+
+        # assemble the two clocks
+        events: list[dict] = []
+        undated: list[dict] = []
+        for f in findings:
+            if f["id"] in f_match:
+                match, matched_in, snippet = "structured", f_match[f["id"]], ""
+            elif f["id"] in f_mention:
+                (matched_in, snippet), match = f_mention[f["id"]], "mention"
+            else:
+                continue
+            when = f.get("event_time", "")
+            row = {"when": when, "sort": _artifact_sort_key(when),
+                   "clock": "incident", "kind": "finding",
+                   "id": f["id"], "ref": f"F{f['id']}",
+                   "label": f.get("title", ""), "ftype": f.get("ftype", ""),
+                   "time_kind": f.get("time_kind", ""),
+                   "starred": f.get("starred", 0), "host": f.get("host", ""),
+                   "match": match, "matched_in": matched_in,
+                   "snippet": snippet}
+            if row["sort"]:
+                events.append(row)
+            else:
+                row["when"] = ""
+                undated.append(row)
+        for a in actions:
+            if a["id"] in a_match:
+                match, matched_in, snippet = "structured", a_match[a["id"]], ""
+            elif a["id"] in a_mention:
+                (matched_in, snippet), match = a_mention[a["id"]], "mention"
+            else:
+                continue
+            when = (a.get("performed_at") or "").replace(" UTC", "")
+            label = ("$ " + a["command"]) if a.get("command") else " — ".join(
+                s for s in (a.get("tool", ""), a.get("procedure", "")) if s)
+            hosts = action_hosts.get(a["id"], [])
+            events.append(
+                {"when": when,
+                 "sort": _artifact_sort_key(a.get("performed_at", "")) or when,
+                 "clock": "investigation", "kind": "action",
+                 "id": a["id"], "ref": f"A{a['id']}", "label": label,
+                 "host": ", ".join(h["name"] for h in hosts)
+                         or a.get("host", ""),
+                 "match": match, "matched_in": matched_in,
+                 "snippet": snippet})
+        for e in evidence:
+            if e["id"] in e_match:
+                match, matched_in, snippet = "structured", e_match[e["id"]], ""
+            elif e["id"] in e_mention:
+                (matched_in, snippet), match = e_mention[e["id"]], "mention"
+            else:
+                continue
+            # acquired_at is free text; fall back to created_at (always _now()
+            # format) when it doesn't parse
+            sort = _artifact_sort_key(e.get("acquired_at", ""))
+            src = "acquired_at" if sort else "created_at"
+            when = (e.get(src) or "").replace(" UTC", "")
+            events.append(
+                {"when": when,
+                 "sort": sort or _artifact_sort_key(e.get("created_at", ""))
+                         or when,
+                 "clock": "investigation", "kind": "evidence",
+                 "id": e["id"], "ref": f"E{e['id']}",
+                 "label": e.get("label", ""),
+                 "host": ", ".join(h["name"] for h in e.get("hosts", [])),
+                 "match": match, "matched_in": matched_in,
+                 "snippet": snippet})
+        events.sort(key=lambda r: (r["sort"], r["clock"], r["kind"], r["id"]))
+
+        rows = events + undated
+        counts = {"events": len(events),
+                  "incident": sum(1 for r in events
+                                  if r["clock"] == "incident"),
+                  "investigation": sum(1 for r in events
+                                       if r["clock"] == "investigation"),
+                  "structured": sum(1 for r in rows
+                                    if r["match"] == "structured"),
+                  "mentions": sum(1 for r in rows if r["match"] == "mention"),
+                  "undated": len(undated)}
+        return {"identity": {"kind": kind, "key": ident["key"],
+                             "entity": entity, "terms": terms},
+                "events": events, "undated": undated, "counts": counts}
 
     # -- leads (triage worklists) ------------------------------------------
 
